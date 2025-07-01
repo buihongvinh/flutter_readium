@@ -83,6 +83,14 @@ abstract class FlutterReadiumPlatform extends PlatformInterface {
       throw UnimplementedError('ttsSetPreferences() has not been implemented');
   // TTS API - END
 
+  // Audiobook API - BEGIN
+  Future<void> playOverlayAudiobook(Publication publication) =>
+      throw UnimplementedError('playOverlayAudiobook(publication) has not been implemented');
+
+  Future<String?> getLinkContent(final String pubIdentifier, final Link link) =>
+      throw UnsupportedError('getLinkContent() hos not been implemented on this platform');
+  // Audiobook API - END
+
   Stream<ReadiumReaderStatus> get onReaderStatusChanged {
     throw UnimplementedError('onReaderStatus stream has not been implemented.');
   }

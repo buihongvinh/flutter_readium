@@ -142,13 +142,15 @@ class BookshelfPageState extends State<BookshelfPage> {
         width: double.infinity,
         padding: const EdgeInsets.fromLTRB(8.0, 4.0, 8.0, 4.0),
         child: InkWell(
-          onTap: () {
+          onTap: () async {
             final fakeInitialLocator = publication.locatorFromLink(publication.readingOrder[2]);
             try {
-              context
-                  .read<PublicationBloc>()
-                  .add(OpenPublication(publication: publication, initialLocator: fakeInitialLocator));
-              Navigator.pushNamed(context, '/player');
+              // context
+              //     .read<PublicationBloc>()
+              //     .add(OpenPublication(publication: publication, initialLocator: fakeInitialLocator));
+              // Navigator.pushNamed(context, '/player');
+
+              await _flutterReadiumPlugin.playOverlayAudiobook(publication);
             } on Object catch (e) {
               _toast('Error opening publication: $e');
             }
@@ -169,6 +171,7 @@ class BookshelfPageState extends State<BookshelfPage> {
                       ),
                       Text(_listAuthors(publication)),
                       Text(publication.metadata.xIsAudiobook ? 'Audiobook' : 'Ebook'),
+                      Text('id: ${publication.metadata.identifier ?? '(no-ident)'}'),
                     ],
                   ),
                   // remove the if when books loaded from asset can be deleted

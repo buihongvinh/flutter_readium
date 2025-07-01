@@ -175,6 +175,9 @@ extension PublicationExtension on Publication {
       totalProgressionDuration: haveTime ? totalProgressionDuration : null,
     );
   }
+
+  bool get hasMediaOverlays =>
+      resources?.firstWhereOrNull((final link) => link.type == MediaType.syncMediaNarration.value) != null;
 }
 
 List<Link>? _badPageListWorkaround(final dynamic shouldBeAList) =>
