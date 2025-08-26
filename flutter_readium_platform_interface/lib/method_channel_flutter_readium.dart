@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'flutter_readium_platform_interface.dart';
@@ -47,15 +48,16 @@ class MethodChannelFlutterReadium extends FlutterReadiumPlatform {
   }
 
   @override
-  Future<Publication> openPublication(String pubUrl) async {
-    final publicationString =
-        await methodChannel.invokeMethod<String>('openPublication', [pubUrl]).then<String>((dynamic result) => result);
-    return Publication.fromJson(json.decode(publicationString) as Map<String, dynamic>);
-  }
+  Future<Publication> openPublication(String pubUrl) async => computeWithBinaryMessenger(() async {
+        final publicationString = await methodChannel
+            .invokeMethod<String>('openPublication', [pubUrl]).then<String>((dynamic result) => result);
+        return Publication.fromJson(json.decode(publicationString) as Map<String, dynamic>);
+      });
 
   @override
-  Future<void> closePublication(String pubIdentifier) async =>
-      await methodChannel.invokeMethod<void>('closePublication', [pubIdentifier]);
+  Future<void> closePublication(String pubIdentifier) async => computeWithBinaryMessenger(
+        () async => await methodChannel.invokeMethod<void>('closePublication', [pubIdentifier]),
+      );
 
   @override
   Future<void> goLeft() async => await currentReaderWidget?.goLeft();
@@ -80,38 +82,55 @@ class MethodChannelFlutterReadium extends FlutterReadiumPlatform {
       await currentReaderWidget?.applyDecorations(id, decorations);
 
   @override
-  Future<void> ttsEnable(TTSPreferences? preferences) async =>
-      await methodChannel.invokeMethod('ttsEnable', preferences?.toMap());
+  Future<void> ttsEnable(TTSPreferences? preferences) async => computeWithBinaryMessenger(() async {
+        await methodChannel.invokeMethod('ttsEnable', preferences?.toMap());
+      });
 
   @override
-  Future<void> ttsStart(Locator? fromLocator) async =>
-      await methodChannel.invokeMethod('ttsStart', [fromLocator?.toJson()]);
+  Future<void> ttsStart(Locator? fromLocator) async => computeWithBinaryMessenger(() async {
+        await methodChannel.invokeMethod('ttsStart', [fromLocator?.toJson()]);
+      });
 
   @override
-  Future<void> ttsStop() async => await methodChannel.invokeMethod('ttsStop');
+  Future<void> ttsStop() async => computeWithBinaryMessenger(() async {
+        await methodChannel.invokeMethod('ttsStop');
+      });
 
   @override
-  Future<void> ttsPause() async => await methodChannel.invokeMethod('ttsPause');
+  Future<void> ttsPause() async => computeWithBinaryMessenger(() async {
+        await methodChannel.invokeMethod('ttsPause');
+      });
 
   @override
-  Future<void> ttsResume() async => await methodChannel.invokeMethod('ttsResume');
+  Future<void> ttsResume() async => computeWithBinaryMessenger(() async {
+        await methodChannel.invokeMethod('ttsResume');
+      });
 
   @override
-  Future<void> ttsNext() async => await methodChannel.invokeMethod('ttsNext');
+  Future<void> ttsNext() async => computeWithBinaryMessenger(() async {
+        await methodChannel.invokeMethod('ttsNext');
+      });
 
   @override
-  Future<void> ttsPrevious() async => await methodChannel.invokeMethod('ttsPrevious');
+  Future<void> ttsPrevious() async => computeWithBinaryMessenger(() async {
+        await methodChannel.invokeMethod('ttsPrevious');
+      });
 
   @override
   Future<void> ttsSetDecorationStyle(
     ReaderDecorationStyle? utteranceDecoration,
     ReaderDecorationStyle? rangeDecoration,
   ) =>
-      methodChannel.invokeMethod('ttsSetDecorationStyle', [utteranceDecoration?.toJson(), rangeDecoration?.toJson()]);
+      computeWithBinaryMessenger(() async {
+        await methodChannel
+            .invokeMethod('ttsSetDecorationStyle', [utteranceDecoration?.toJson(), rangeDecoration?.toJson()]);
+      });
 
   @override
   Future<List<ReaderTTSVoice>> ttsGetAvailableVoices() async {
-    final voicesStr = await methodChannel.invokeMethod<List<dynamic>>('ttsGetAvailableVoices');
+    final voicesStr = await computeWithBinaryMessenger(
+        () async => await methodChannel.invokeMethod<List<dynamic>>('ttsGetAvailableVoices'));
+
     final voices = voicesStr
             ?.cast<String>()
             .map<Map<String, dynamic>>((str) => json.decode(str) as Map<String, dynamic>)
@@ -123,14 +142,32 @@ class MethodChannelFlutterReadium extends FlutterReadiumPlatform {
 
   @override
   Future<void> ttsSetVoice(String voiceIdentifier, String? forLanguage) async {
-    await methodChannel.invokeMethod('ttsSetVoice', [voiceIdentifier, forLanguage]);
+    await computeWithBinaryMessenger(() async {
+      await methodChannel.invokeMethod('ttsSetVoice', [voiceIdentifier, forLanguage]);
+    });
   }
 
   @override
-  Future<void> ttsSetPreferences(TTSPreferences preferences) =>
-      methodChannel.invokeMethod('ttsSetPreferences', preferences.toMap());
+  Future<void> ttsSetPreferences(TTSPreferences preferences) => computeWithBinaryMessenger(() async {
+        await methodChannel.invokeMethod('ttsSetPreferences', preferences.toMap());
+      });
 
   @override
-  Future<String?> getLinkContent(final String pubIdentifier, final Link link) =>
-      methodChannel.invokeMethod<String>('getLinkContent', [pubIdentifier, jsonEncode(link.toJson())]);
+  Future<String?> getLinkContent(final String pubIdentifier, final Link link) => computeWithBinaryMessenger(() async =>
+      await methodChannel.invokeMethod<String>('getLinkContent', [pubIdentifier, jsonEncode(link.toJson())]));
 }
+
+// Executes a computation in an isolate using a binary message.
+// Automatically handles the binary message passing when needed for
+// iOS and Android.
+// Use this function for calls that requires BackgroundIsolateBinaryMessenger.
+Future<T> computeWithBinaryMessenger<T>(final FutureOr<T> Function() computation) async => await compute(
+      (final token) {
+        if (!kIsWeb && token != null) {
+          BackgroundIsolateBinaryMessenger.ensureInitialized(token);
+        }
+
+        return computation();
+      },
+      kIsWeb ? null : RootIsolateToken.instance,
+    );
