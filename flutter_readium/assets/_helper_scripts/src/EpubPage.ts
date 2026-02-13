@@ -808,9 +808,7 @@ export class EpubPage {
   }
 
   private _findFirstVisibleCssSelector(): string {
-    const selector = this._getCssSelector(this._getFirstVisibleElement());
-
-    return selector;
+    return readium.findFirstVisibleLocator().locations?.cssSelector ?? this._getCssSelector(this._getFirstVisibleElement());
   }
 
   private _getCssSelector(element: Element): string {

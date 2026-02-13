@@ -218,6 +218,8 @@ class ReadiumReaderWidget(
                 return
             }
 
+            Log.d(TAG, ":emitOnPageChanged locator:$locator withFragments:$locatorWithFragments")
+
             channel.onPageChanged(locatorWithFragments)
             ReadiumReader.emitTextLocatorUpdate(locatorWithFragments)
         } catch (e: Exception) {
