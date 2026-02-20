@@ -1,0 +1,42 @@
+{
+  "readingOrder": [
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/free/49965/Vilde_v_sner_og_s_re_steder_-_Del_1-00001.mp3?format=WebPubAudioOnly",
+      "duration": 1683.692,
+      "title": "Vilde væsner og sære steder, lydfortællinger Lolland.",
+      "type": "audio/mpeg"
+    }
+  ],
+  "toc": [
+    {
+      "href": "Vilde_v_sner_og_s_re_steder_-_Del_1-00001.mp3#t=0",
+      "title": "Vilde væsner og sære steder, lydfortællinger Lolland."
+    }
+  ],
+  "@context": "https://readium.org/webpub-manifest/context.jsonld",
+  "metadata": {
+    "conformsTo": "https://readium.org/webpub-manifest/profiles/audiobook",
+    "identifier": "dk-nota-49965",
+    "modified": "2023-06-07",
+    "narrator": [],
+    "author": "Nota",
+    "duration": 1684,
+    "title": "Vilde væsner og sære steder - Del 1",
+    "language": null,
+    "@type": "http://schema.org/Audiobook"
+  },
+  "links": [
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/free/49965/manifest.json?format=WebPubAudioOnly",
+      "rel": "self",
+      "type": "application/webpub+json"
+    }
+  ],
+  "resources": [
+    {
+      "href": "cover.jpg",
+      "rel": "cover",
+      "type": "image/jpeg"
+    }
+  ]
+}

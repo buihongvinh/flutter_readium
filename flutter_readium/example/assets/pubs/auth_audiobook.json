@@ -1,0 +1,165 @@
+{
+  "readingOrder": [
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/Lyra_s_Oxford-00001.mp3?format=WebPubAudioOnly",
+      "duration": 15.02,
+      "title": "Lyra's Oxford",
+      "type": "audio/mpeg"
+    },
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/Lyra_s_Oxford-00002.mp3?format=WebPubAudioOnly",
+      "duration": 4.232,
+      "title": "Details of Book",
+      "type": "audio/mpeg"
+    },
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/Lyra_s_Oxford-00003.mp3?format=WebPubAudioOnly",
+      "duration": 33.019,
+      "title": "Blurb",
+      "type": "audio/mpeg"
+    },
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/Lyra_s_Oxford-00004.mp3?format=WebPubAudioOnly",
+      "duration": 9.117,
+      "title": "Chapters",
+      "type": "audio/mpeg"
+    },
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/Lyra_s_Oxford-00005.mp3?format=WebPubAudioOnly",
+      "duration": 8.738,
+      "title": "Structure",
+      "type": "audio/mpeg"
+    },
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/Lyra_s_Oxford-00006.mp3?format=WebPubAudioOnly",
+      "duration": 21.773,
+      "title": "Copyright",
+      "type": "audio/mpeg"
+    },
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/Lyra_s_Oxford-00007.mp3?format=WebPubAudioOnly",
+      "duration": 5.864,
+      "title": "Title Page",
+      "type": "audio/mpeg"
+    },
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/Lyra_s_Oxford-00008.mp3?format=WebPubAudioOnly",
+      "duration": 53.864,
+      "title": "Quote",
+      "type": "audio/mpeg"
+    },
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/Lyra_s_Oxford-00009.mp3?format=WebPubAudioOnly",
+      "duration": 149.708,
+      "title": "Author's Note",
+      "type": "audio/mpeg"
+    },
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/Lyra_s_Oxford-00010.mp3?format=WebPubAudioOnly",
+      "duration": 3030.48,
+      "title": "Lyra and the Birds",
+      "type": "audio/mpeg"
+    },
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/Lyra_s_Oxford-00011.mp3?format=WebPubAudioOnly",
+      "duration": 3.931,
+      "title": "End by Title",
+      "type": "audio/mpeg"
+    },
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/Lyra_s_Oxford-00012.mp3?format=WebPubAudioOnly",
+      "duration": 12.382,
+      "title": "Location",
+      "type": "audio/mpeg"
+    },
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/Lyra_s_Oxford-00013.mp3?format=WebPubAudioOnly",
+      "duration": 58.867,
+      "title": "End Generic",
+      "type": "audio/mpeg"
+    }
+  ],
+  "toc": [
+    {
+      "href": "Lyra_s_Oxford-00001.mp3#t=0",
+      "title": "Lyra's Oxford"
+    },
+    {
+      "href": "Lyra_s_Oxford-00002.mp3#t=0",
+      "title": "Details of Book"
+    },
+    {
+      "href": "Lyra_s_Oxford-00003.mp3#t=0",
+      "title": "Blurb"
+    },
+    {
+      "href": "Lyra_s_Oxford-00004.mp3#t=0",
+      "title": "Chapters"
+    },
+    {
+      "href": "Lyra_s_Oxford-00005.mp3#t=0",
+      "title": "Structure"
+    },
+    {
+      "href": "Lyra_s_Oxford-00006.mp3#t=0",
+      "title": "Copyright"
+    },
+    {
+      "href": "Lyra_s_Oxford-00007.mp3#t=0",
+      "title": "Title Page"
+    },
+    {
+      "href": "Lyra_s_Oxford-00008.mp3#t=0",
+      "title": "Quote"
+    },
+    {
+      "href": "Lyra_s_Oxford-00009.mp3#t=0",
+      "title": "Author's Note"
+    },
+    {
+      "href": "Lyra_s_Oxford-00010.mp3#t=0",
+      "title": "Lyra and the Birds"
+    },
+    {
+      "href": "Lyra_s_Oxford-00011.mp3#t=0",
+      "title": "End by Title"
+    },
+    {
+      "href": "Lyra_s_Oxford-00012.mp3#t=0",
+      "title": "Location"
+    },
+    {
+      "href": "Lyra_s_Oxford-00013.mp3#t=0",
+      "title": "End Generic"
+    }
+  ],
+  "@context": "https://readium.org/webpub-manifest/context.jsonld",
+  "metadata": {
+    "conformsTo": "https://readium.org/webpub-manifest/profiles/audiobook",
+    "identifier": "dk-nota-39031",
+    "modified": "2011-11-24",
+    "narrator": [
+      "David Thorpe"
+    ],
+    "author": "Philip Pullman",
+    "duration": 3406,
+    "title": "Lyra's Oxford",
+    "language": null,
+    "@type": "http://schema.org/Audiobook",
+    "stamp": "22617184"
+  },
+  "links": [
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/manifest.json?format=WebPubAudioOnly",
+      "rel": "self",
+      "type": "application/webpub+json"
+    }
+  ],
+  "resources": [
+    {
+      "href": "https://merkur.beta.dbb.dk/opds2/publication/merkur:libraryid:39031/cover.jpg?format=WebPubAudioOnly",
+      "rel": "cover",
+      "type": "image/jpeg"
+    }
+  ]
+}
