@@ -408,6 +408,38 @@ class EpubNavigator : BaseNavigator, EpubReaderFragment.Listener {
         evaluateJavascript("window.epubPage.scrollToLocations($json,$isVerticalScroll,$toStart);")
     }
 
+    private fun parseFragmentInt(fragments: List<String>?, key: String): Int? {
+        if (fragments.isNullOrEmpty()) return null
+        val prefix = "$key="
+        return fragments.firstOrNull { it.startsWith(prefix) }
+            ?.substringAfter(prefix)
+            ?.toIntOrNull()
+    }
+
+    private suspend fun scrollToPage(pageIndex: Int, totalPagesHint: Int?) {
+        val safePageIndex = pageIndex.coerceAtLeast(1)
+        val safeTotalPagesHint = (totalPagesHint ?: safePageIndex).coerceAtLeast(1)
+        val script = """
+            (function() {
+              var root = document.scrollingElement || document.documentElement;
+              var vw = window.innerWidth || 0;
+              var sw = root ? root.scrollWidth : 0;
+              if (!root || !vw || !sw || typeof readium === 'undefined' || !readium || !readium.scrollToPosition) {
+                return false;
+              }
+              var estimatedTotal = Math.max($safeTotalPagesHint, Math.round(sw / vw), 1);
+              var targetPage = Math.min(Math.max($safePageIndex, 1), estimatedTotal);
+              var targetLeft = (targetPage - 1) * vw;
+              var offset = Math.min(Math.max(targetLeft / sw, 0), 1);
+              readium.scrollToPosition(offset);
+              return true;
+            })();
+        """.trimIndent()
+
+        Log.d(TAG, "::scrollToPage page=$safePageIndex totalHint=$safeTotalPagesHint")
+        evaluateJavascript(script)
+    }
+
     /**
      * Go to a specific locator in the EPUB navigator, this scrolls to the locator position if needed.
      */
@@ -430,8 +462,13 @@ class EpubNavigator : BaseNavigator, EpubReaderFragment.Listener {
                 scrollToLocations(Locator.Locations(progression = 0.0), true)
             } else {
                 Log.d(TAG, "::goToLocator: Already at $locatorHref, scroll to position")
-
-                scrollToLocations(locations, false)
+                val targetPage = parseFragmentInt(locations.fragments, "page")
+                val totalPages = parseFragmentInt(locations.fragments, "totalPages")
+                if (!isVerticalScroll && targetPage != null) {
+                    scrollToPage(targetPage, totalPages)
+                } else {
+                    scrollToLocations(locations, false)
+                }
             }
         }.await()
     }
