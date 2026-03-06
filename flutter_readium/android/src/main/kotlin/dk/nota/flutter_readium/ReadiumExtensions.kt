@@ -66,27 +66,52 @@ fun decorationStyleFromMap(decoMap: Map<*, *>?): Decoration.Style? {
     }
 }
 
+private fun mapString(prefMap: Map<String, Any?>, key: String): String? {
+    val value = prefMap[key]?.toString()?.trim()
+    return if (value.isNullOrEmpty() || value.equals("null", ignoreCase = true)) null else value
+}
+
+private fun mapDouble(prefMap: Map<String, Any?>, key: String): Double? =
+    mapString(prefMap, key)?.toDoubleOrNull()
+
+private fun mapBoolean(prefMap: Map<String, Any?>, key: String): Boolean? {
+    val value = mapString(prefMap, key) ?: return null
+    return when (value.lowercase()) {
+        "true" -> true
+        "false" -> false
+        else -> null
+    }
+}
+
+private fun mapReadiumColor(prefMap: Map<String, Any?>, key: String): ReadiumColor? {
+    val cssColor = mapString(prefMap, key) ?: return null
+    if (cssColor.equals("inherit", ignoreCase = true)) return null
+    return runCatching { readiumColorFromCSS(cssColor) }
+        .onFailure { Log.w(TAG, "Invalid color for key '$key': $cssColor") }
+        .getOrNull()
+}
+
 fun epubPreferencesFromMap(
-    prefMap: Map<String, String>,
+    prefMap: Map<String, Any?>,
     defaults: EpubPreferences?,
 ): EpubPreferences {
-    try {
-        val newPreferences = EpubPreferences(
-            fontFamily = prefMap["fontFamily"]?.let { FontFamily(it) } ?: defaults?.fontFamily,
-            fontSize = prefMap["fontSize"]?.toDoubleOrNull() ?: defaults?.fontSize,
-            fontWeight = prefMap["fontWeight"]?.toDoubleOrNull() ?: defaults?.fontWeight,
-            scroll = prefMap["verticalScroll"]?.toBoolean() ?: defaults?.scroll,
-            backgroundColor = prefMap["backgroundColor"]?.let { readiumColorFromCSS(it) }
-                ?: defaults?.backgroundColor,
-            textColor = prefMap["textColor"]?.let { readiumColorFromCSS(it) }
-                ?: defaults?.textColor,
-            pageMargins = prefMap["pageMargins"]?.toDoubleOrNull() ?: defaults?.pageMargins,
-        )
-        return newPreferences
-    } catch (ex: Exception) {
-        Log.e("ReadiumExtensions", "Error mapping JSONObject to EpubPreferences: $ex")
-        return EpubPreferences()
-    }
+    val fontFamily = mapString(prefMap, "fontFamily")?.let { FontFamily(it) } ?: defaults?.fontFamily
+    val fontSize = mapDouble(prefMap, "fontSize") ?: defaults?.fontSize
+    val fontWeight = mapDouble(prefMap, "fontWeight") ?: defaults?.fontWeight
+    val scroll = mapBoolean(prefMap, "verticalScroll") ?: defaults?.scroll
+    val backgroundColor = mapReadiumColor(prefMap, "backgroundColor") ?: defaults?.backgroundColor
+    val textColor = mapReadiumColor(prefMap, "textColor") ?: defaults?.textColor
+    val pageMargins = mapDouble(prefMap, "pageMargins") ?: defaults?.pageMargins
+
+    return EpubPreferences(
+        fontFamily = fontFamily,
+        fontSize = fontSize,
+        fontWeight = fontWeight,
+        scroll = scroll,
+        backgroundColor = backgroundColor,
+        textColor = textColor,
+        pageMargins = pageMargins,
+    )
 }
 
 private const val READIUM_FLUTTER_PATH_PREFIX =
