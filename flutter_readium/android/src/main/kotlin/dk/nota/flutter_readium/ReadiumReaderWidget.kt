@@ -95,7 +95,7 @@ class ReadiumReaderWidget(
         Log.d(TAG, "::init")
 
         @Suppress("UNCHECKED_CAST")
-        val initPrefsMap = creationParams["preferences"] as Map<String, Any?>?
+        val initPrefsMap = creationParams["preferences"] as Map<String, String>?
         val publication = ReadiumReader.currentPublication
         val locatorString = creationParams["initialLocator"] as String?
         val allowScreenReaderNavigation = creationParams["allowScreenReaderNavigation"] as Boolean?
@@ -204,7 +204,7 @@ class ReadiumReaderWidget(
         withScope(mainScope) { ReadiumReader.getFirstVisibleLocator() }
 
     @Throws(IllegalArgumentException::class)
-    private fun setPreferencesFromMap(prefMap: Map<String, Any?>) {
+    private fun setPreferencesFromMap(prefMap: Map<String, String>) {
         Log.d(TAG, "::setPreferencesFromMap")
         val newPreferences = epubPreferencesFromMap(prefMap, null)
         updatePreferences(newPreferences)
@@ -247,7 +247,7 @@ class ReadiumReaderWidget(
             when (call.method) {
                 "setPreferences" -> {
                     @Suppress("UNCHECKED_CAST")
-                    val prefsMap = call.arguments as Map<String, Any?>
+                    val prefsMap = call.arguments as Map<String, String>
                     try {
                         setPreferencesFromMap(prefsMap)
                         result.success(null)
