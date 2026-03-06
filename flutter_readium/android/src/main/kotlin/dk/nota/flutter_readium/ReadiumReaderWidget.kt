@@ -158,7 +158,9 @@ class ReadiumReaderWidget(
     private var lastPageLoadedKey: String? = null
 
     override fun onPageChanged(pageIndex: Int, totalPages: Int, locator: Locator) {
-        val currentKey = "${locator.href}@${locator.locations.progression}"
+        // Keep page index in the dedupe key so page transitions are not swallowed when
+        // the locator progression still points to the same spanning text node.
+        val currentKey = "$pageIndex/$totalPages@${locator.href}@${locator.locations.progression}"
         Log.d(
             TAG,
             "::onPageChanged $pageIndex/$totalPages ${locator.href} ${locator.locations.progression} ${locator.locations}"
