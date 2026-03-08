@@ -42,13 +42,15 @@ class ReadiumReaderWidget extends StatefulWidget {
   State<StatefulWidget> createState() => _ReadiumReaderWidgetState();
 }
 
-class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements ReadiumReaderWidgetInterface {
+class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget>
+    implements ReadiumReaderWidgetInterface {
   static const _wakelockTimerDuration = Duration(minutes: 30);
 
   Timer? _wakelockTimer;
   ReadiumReaderChannel? _channel;
   bool wasDestroyed = false;
   bool isReady = false;
+  EPUBPreferences? _pendingPreferences;
 
   final _isReadyCompleter = Completer<Locator>();
 
@@ -98,10 +100,18 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements Re
   }
 
   @override
-  Future<void> go(final Locator locator, {required final bool isAudioBookWithText, final bool animated = false}) async {
+  Future<void> go(
+    final Locator locator, {
+    required final bool isAudioBookWithText,
+    final bool animated = false,
+  }) async {
     R2Log.d(() => 'Go to $locator');
 
-    await _channel?.go(locator, animated: animated, isAudioBookWithText: isAudioBookWithText);
+    await _channel?.go(
+      locator,
+      animated: animated,
+      isAudioBookWithText: isAudioBookWithText,
+    );
 
     R2Log.d('Done');
   }
@@ -110,7 +120,8 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements Re
   Future<void> goLeft({final bool animated = true}) async => _channel?.goLeft();
 
   @override
-  Future<void> goRight({final bool animated = true}) async => _channel?.goRight();
+  Future<void> goRight({final bool animated = true}) async =>
+      _channel?.goRight();
 
   @override
   Future<void> skipToNext({final bool animated = true}) async {
@@ -133,7 +144,11 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements Re
       final newIndex = (curIndex + 1).clamp(0, toc.length - 1);
       Locator? nextChapter = widget.publication.locatorFromLink(toc[newIndex]);
       if (nextChapter != null) {
-        await _channel?.go(nextChapter, isAudioBookWithText: false, animated: true);
+        await _channel?.go(
+          nextChapter,
+          isAudioBookWithText: false,
+          animated: true,
+        );
       }
     }
   }
@@ -148,9 +163,15 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements Re
     int? curIndex = toc.indexWhere((l) => l.href == currentHref);
     if (curIndex > -1) {
       final newIndex = (curIndex - 1).clamp(0, toc.length - 1);
-      Locator? previousChapter = widget.publication.locatorFromLink(toc[newIndex]);
+      Locator? previousChapter = widget.publication.locatorFromLink(
+        toc[newIndex],
+      );
       if (previousChapter != null) {
-        await _channel?.go(previousChapter, isAudioBookWithText: false, animated: true);
+        await _channel?.go(
+          previousChapter,
+          isAudioBookWithText: false,
+          animated: true,
+        );
       }
     }
   }
@@ -172,11 +193,19 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements Re
 
   @override
   Future<void> setEPUBPreferences(EPUBPreferences preferences) async {
-    _channel?.setEPUBPreferences(preferences);
+    _pendingPreferences = preferences;
+    final channel = _channel;
+    if (channel == null) {
+      return;
+    }
+    await channel.setEPUBPreferences(preferences);
   }
 
   @override
-  Future<void> applyDecorations(String id, List<ReaderDecoration> decorations) async {
+  Future<void> applyDecorations(
+    String id,
+    List<ReaderDecoration> decorations,
+  ) async {
     await _channel?.applyDecorations(id, decorations);
   }
 
@@ -190,7 +219,9 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements Re
     final creationParams = <String, dynamic>{
       'pubIdentifier': publication.identifier,
       'preferences': defaultPreferences,
-      'initialLocator': widget.initialLocator == null ? null : json.encode(widget.initialLocator),
+      'initialLocator': widget.initialLocator == null
+          ? null
+          : json.encode(widget.initialLocator),
     };
 
     R2Log.d('creationParams=$creationParams');
@@ -226,7 +257,11 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements Re
     }
     return ColoredBox(
       color: const Color(0xffff00ff),
-      child: Center(child: Text('TODO — Implement ReadiumReaderWidget on ${Platform.operatingSystem}.')),
+      child: Center(
+        child: Text(
+          'TODO — Implement ReadiumReaderWidget on ${Platform.operatingSystem}.',
+        ),
+      ),
     );
   }
 
@@ -275,6 +310,11 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements Re
       },
     );
 
+    final pendingPreferences = _pendingPreferences;
+    if (pendingPreferences != null) {
+      unawaited(_channel?.setEPUBPreferences(pendingPreferences));
+    }
+
     R2Log.d('New widget is: ${_channel?.name}');
 
     // TODO: This is just to demo how to use and debounce the Stream, remove when appropriate.
@@ -299,7 +339,9 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements Re
     }
 
     final txtLoc = locator.toTextLocator();
-    final tocFragment = locator.locations?.fragments.firstWhereOrNull((f) => f.startsWith("toc="));
+    final tocFragment = locator.locations?.fragments.firstWhereOrNull(
+      (f) => f.startsWith("toc="),
+    );
     if (tocFragment == null) {
       return null;
     }
@@ -325,12 +367,15 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements Re
       // trigger scrolling to the nearest page.
       if (_lastOrientation != null && _currentLocator != null) {
         Future.delayed(const Duration(milliseconds: 500)).then((final value) {
-          R2Log.d('Orientation changed. Re-navigating to current locator to re-align page.');
+          R2Log.d(
+            'Orientation changed. Re-navigating to current locator to re-align page.',
+          );
           R2Log.d('locator = $_currentLocator');
           _channel?.go(
             _currentLocator!,
             animated: false,
-            isAudioBookWithText: false, // TODO: isAudioBookWithText - we don't know atm.
+            isAudioBookWithText:
+                false, // TODO: isAudioBookWithText - we don't know atm.
           );
         });
       }
