@@ -30,6 +30,7 @@ import org.readium.r2.shared.ExperimentalReadiumApi
 import org.readium.r2.shared.publication.Locator
 import org.readium.r2.shared.publication.Publication
 import org.readium.r2.shared.util.AbsoluteUrl
+import kotlin.math.abs
 import kotlin.time.Duration.Companion.milliseconds
 
 private const val TAG = "EpubNavigator"
@@ -443,20 +444,42 @@ class EpubNavigator : BaseNavigator, EpubReaderFragment.Listener {
     /**
      * Go to a specific locator in the EPUB navigator, this scrolls to the locator position if needed.
      */
-    suspend fun goToLocator(locator: Locator, animated: Boolean) {
+    suspend fun goToLocator(
+        locator: Locator,
+        animated: Boolean,
+        forceInChapterNavigation: Boolean = false
+    ) {
         mainScope.async {
             val locations = locator.locations
             val shouldScroll = canScroll(locations)
             val locatorHref = locator.href
             val currentHref = currentLocator?.value?.href
-            val shouldGo = currentHref?.isEquivalent(locatorHref) == false
+            val sameHref = currentHref?.isEquivalent(locatorHref) == true
+            val shouldGoByHref = currentHref?.isEquivalent(locatorHref) == false
+            val currentProgression = currentLocator?.value?.locations?.progression
+            val targetProgression = locations.progression
+            val shouldGoByProgression =
+                forceInChapterNavigation &&
+                    sameHref &&
+                    currentProgression != null &&
+                    targetProgression != null &&
+                    abs(currentProgression - targetProgression) > 0.001
 
             // TODO: Figure out why we can't just use rely on Readium's own go-function to scroll
             // the locator.
-            if (shouldGo) {
-                Log.d(TAG, "::goToLocator: Go to $locatorHref from $currentHref")
-                pendingScrollToLocations = locations
-                go(locator, animated)
+            if (shouldGoByHref || shouldGoByProgression) {
+                if (shouldGoByProgression) {
+                    Log.d(
+                        TAG,
+                        "::goToLocator: Force in-chapter go on progression change $currentProgression -> $targetProgression"
+                    )
+                } else {
+                    Log.d(TAG, "::goToLocator: Go to $locatorHref from $currentHref")
+                    pendingScrollToLocations = locations
+                }
+                if (!go(locator, animated) && shouldScroll) {
+                    scrollToLocations(locations, true)
+                }
             } else if (!shouldScroll) {
                 Log.w(TAG, "::goToLocator: Already at $locatorHref, no scroll target, go to start")
                 scrollToLocations(Locator.Locations(progression = 0.0), true)
