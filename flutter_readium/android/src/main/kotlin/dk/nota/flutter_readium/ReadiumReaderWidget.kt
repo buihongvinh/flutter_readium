@@ -271,11 +271,7 @@ class ReadiumReaderWidget(
                         )
                     }
                     val locator = Locator.fromJSON(locatorJson)!!
-                    ReadiumReader.epubGoToLocator(
-                        locator,
-                        animated,
-                        forceInChapterNavigation = isAudioBookWithText
-                    )
+                    ReadiumReader.epubGoToLocator(locator, animated)
                     setLocation(locator, isAudioBookWithText)
                     result.success(null)
                 }

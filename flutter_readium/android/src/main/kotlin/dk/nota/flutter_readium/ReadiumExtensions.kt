@@ -70,23 +70,23 @@ fun epubPreferencesFromMap(
     prefMap: Map<String, String>,
     defaults: EpubPreferences?,
 ): EpubPreferences {
-    fun parseSafeColor(cssValue: String?, fallback: ReadiumColor?): ReadiumColor? {
-        val normalized = cssValue?.trim()?.takeIf { it.isNotEmpty() && !it.equals("inherit", true) && !it.equals("null", true) }
-            ?: return fallback
-        return runCatching { readiumColorFromCSS(normalized) }
-            .onFailure { Log.w(TAG, "Invalid color '$normalized', keeping previous color") }
-            .getOrNull() ?: fallback
+    try {
+        val newPreferences = EpubPreferences(
+            fontFamily = prefMap["fontFamily"]?.let { FontFamily(it) } ?: defaults?.fontFamily,
+            fontSize = prefMap["fontSize"]?.toDoubleOrNull() ?: defaults?.fontSize,
+            fontWeight = prefMap["fontWeight"]?.toDoubleOrNull() ?: defaults?.fontWeight,
+            scroll = prefMap["verticalScroll"]?.toBoolean() ?: defaults?.scroll,
+            backgroundColor = prefMap["backgroundColor"]?.let { readiumColorFromCSS(it) }
+                ?: defaults?.backgroundColor,
+            textColor = prefMap["textColor"]?.let { readiumColorFromCSS(it) }
+                ?: defaults?.textColor,
+            pageMargins = prefMap["pageMargins"]?.toDoubleOrNull() ?: defaults?.pageMargins,
+        )
+        return newPreferences
+    } catch (ex: Exception) {
+        Log.e("ReadiumExtensions", "Error mapping JSONObject to EpubPreferences: $ex")
+        return EpubPreferences()
     }
-
-    return EpubPreferences(
-        fontFamily = prefMap["fontFamily"]?.let { FontFamily(it) } ?: defaults?.fontFamily,
-        fontSize = prefMap["fontSize"]?.toDoubleOrNull() ?: defaults?.fontSize,
-        fontWeight = prefMap["fontWeight"]?.toDoubleOrNull() ?: defaults?.fontWeight,
-        scroll = prefMap["verticalScroll"]?.toBoolean() ?: defaults?.scroll,
-        backgroundColor = parseSafeColor(prefMap["backgroundColor"], defaults?.backgroundColor),
-        textColor = parseSafeColor(prefMap["textColor"], defaults?.textColor),
-        pageMargins = prefMap["pageMargins"]?.toDoubleOrNull() ?: defaults?.pageMargins,
-    )
 }
 
 private const val READIUM_FLUTTER_PATH_PREFIX =

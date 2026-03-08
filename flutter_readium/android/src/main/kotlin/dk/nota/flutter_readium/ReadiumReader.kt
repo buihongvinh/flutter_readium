@@ -924,12 +924,8 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     /**
      * Go to a specific locator in the EPUB navigator, this scrolls to the locator position if needed.
      */
-    suspend fun epubGoToLocator(
-        locator: Locator,
-        animated: Boolean,
-        forceInChapterNavigation: Boolean = false
-    ) {
-        epubNavigator?.goToLocator(locator, animated, forceInChapterNavigation)
+    suspend fun epubGoToLocator(locator: Locator, animated: Boolean) {
+        epubNavigator?.goToLocator(locator, animated)
     }
 
     /**
