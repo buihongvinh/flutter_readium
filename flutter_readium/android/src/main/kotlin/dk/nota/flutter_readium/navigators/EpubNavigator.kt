@@ -441,6 +441,72 @@ class EpubNavigator : BaseNavigator, EpubReaderFragment.Listener {
         evaluateJavascript(script)
     }
 
+    private suspend fun scrollToHighlightedText(locator: Locator): Boolean {
+        val locatorJson = locator.toJSON().toString()
+        val script = """
+            (function() {
+              try {
+                var locator = $locatorJson;
+                var locations = locator && locator.locations ? locator.locations : null;
+                var selector = locations && locations.cssSelector ? locations.cssSelector : null;
+                if (!selector) return false;
+
+                var rootElement = document.querySelector(selector);
+                if (!rootElement) return false;
+
+                var text = locator && locator.text ? locator.text : null;
+                var highlight = text && text.highlight ? String(text.highlight).trim() : '';
+                if (!highlight) return false;
+
+                function clamp(v, min, max) { return Math.min(Math.max(v, min), max); }
+                function scrollToRect(rect) {
+                  var root = document.scrollingElement || document.documentElement;
+                  if (!root || !rect || typeof readium === 'undefined' || !readium || !readium.scrollToPosition) {
+                    return false;
+                  }
+                  var sw = root.scrollWidth || 0;
+                  var sh = root.scrollHeight || 0;
+                  var sl = root.scrollLeft || 0;
+                  var st = root.scrollTop || 0;
+                  if ($isVerticalScroll) {
+                    if (!sh) return false;
+                    var offsetY = clamp((st + rect.top) / sh, 0, 1);
+                    readium.scrollToPosition(offsetY);
+                    return true;
+                  }
+                  if (!sw) return false;
+                  var offsetX = clamp((sl + 0.5 * (rect.left + rect.right)) / sw, 0, 1);
+                  readium.scrollToPosition(offsetX);
+                  return true;
+                }
+
+                var walker = document.createTreeWalker(rootElement, NodeFilter.SHOW_TEXT);
+                var node;
+                while ((node = walker.nextNode())) {
+                  var content = node && node.nodeValue ? node.nodeValue : '';
+                  var index = content.indexOf(highlight);
+                  if (index < 0) continue;
+                  var range = document.createRange();
+                  range.setStart(node, index);
+                  range.setEnd(node, index + highlight.length);
+                  var rect = range.getBoundingClientRect();
+                  if (!rect || (rect.left === 0 && rect.right === 0 && rect.top === 0 && rect.bottom === 0)) {
+                    continue;
+                  }
+                  return scrollToRect(rect);
+                }
+
+                return false;
+              } catch (_) {
+                return false;
+              }
+            })();
+        """.trimIndent()
+
+        val res = evaluateJavascript(script)
+        return res == "true" || res == "\"true\""
+    }
+
     /**
      * Go to a specific locator in the EPUB navigator, this scrolls to the locator position if needed.
      */
@@ -464,6 +530,11 @@ class EpubNavigator : BaseNavigator, EpubReaderFragment.Listener {
                     currentProgression != null &&
                     targetProgression != null &&
                     abs(currentProgression - targetProgression) > 0.001
+
+            if (forceInChapterNavigation && sameHref && shouldScroll && scrollToHighlightedText(locator)) {
+                Log.d(TAG, "::goToLocator: Scrolled by highlighted text locator")
+                return@async
+            }
 
             // TODO: Figure out why we can't just use rely on Readium's own go-function to scroll
             // the locator.
