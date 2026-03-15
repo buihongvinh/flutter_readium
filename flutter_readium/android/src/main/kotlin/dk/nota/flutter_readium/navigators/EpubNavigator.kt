@@ -442,33 +442,21 @@ class EpubNavigator : BaseNavigator, EpubReaderFragment.Listener {
 
     /**
      * Go to a specific locator in the EPUB navigator, this scrolls to the locator position if needed.
+     * 
+     * FIXED: Delegate entirely to Readium Native Core 'go()' instead of using JavaScript scrolling.
+     * The JavaScript scrollToLocations() has calculation issues in paginated mode, especially with
+     * images, variable fonts, and complex layouts. The native Readium engine handles pagination
+     * correctly using proper column-width calculations.
      */
     suspend fun goToLocator(locator: Locator, animated: Boolean) {
         mainScope.async {
-            val locations = locator.locations
-            val shouldScroll = canScroll(locations)
-            val locatorHref = locator.href
-            val currentHref = currentLocator?.value?.href
-            val shouldGo = currentHref?.isEquivalent(locatorHref) == false
-
-            // TODO: Figure out why we can't just use rely on Readium's own go-function to scroll
-            // the locator.
-            if (shouldGo) {
-                Log.d(TAG, "::goToLocator: Go to $locatorHref from $currentHref")
-                pendingScrollToLocations = locations
-                go(locator, animated)
-            } else if (!shouldScroll) {
-                Log.w(TAG, "::goToLocator: Already at $locatorHref, no scroll target, go to start")
-                scrollToLocations(Locator.Locations(progression = 0.0), true)
-            } else {
-                Log.d(TAG, "::goToLocator: Already at $locatorHref, scroll to position")
-                val targetPage = parseFragmentInt(locations.fragments, "page")
-                val totalPages = parseFragmentInt(locations.fragments, "totalPages")
-                if (!isVerticalScroll && targetPage != null) {
-                    scrollToPage(targetPage, totalPages)
-                } else {
-                    scrollToLocations(locations, false)
-                }
+            Log.d(TAG, "::goToLocator: Navigating to ${locator.href}")
+            
+            // Always use the native Readium go() function for reliable navigation
+            val success = go(locator, animated)
+            
+            if (!success) {
+                Log.w(TAG, "::goToLocator: Readium core navigation failed for ${locator.href}")
             }
         }.await()
     }

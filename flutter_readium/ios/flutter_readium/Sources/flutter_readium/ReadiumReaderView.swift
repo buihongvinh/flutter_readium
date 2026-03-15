@@ -308,24 +308,19 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
   }
 
   func goToLocator(locator: Locator, animated: Bool) async -> Void {
-    let locations = locator.locations
-    let shouldScroll = canScroll(locations: locations)
-    let shouldGo = readiumViewController.currentLocation?.href != locator.href
+    // FIXED: Delegate entirely to Readium Native Core 'go()' instead of using JavaScript scrolling.
+    // The JavaScript scrollToLocations() has calculation issues in paginated mode, especially with
+    // images, variable fonts, and complex layouts. The native Readium engine handles pagination
+    // correctly using proper column-width calculations.
     let readiumViewController = self.readiumViewController
 
-    if shouldGo {
-      print(TAG, "goToLocator: Go to \(locator.href)")
-      let goToSuccees = await readiumViewController.go(to: locator, options: NavigatorGoOptions(animated: animated))
-      if (goToSuccees && shouldScroll) {
-        await self.scrollTo(locations: locations, toStart: false)
-        self.emitOnPageChanged()
-      }
-    } else {
-      print(TAG, "goToLocator: Already there, Scroll to \(locator.href)")
-      if (shouldScroll) {
-        await self.scrollTo(locations: locations, toStart: false)
-        self.emitOnPageChanged()
-      }
+    print(TAG, "goToLocator: Navigating to \(locator.href)")
+    
+    // Always use the native Readium go() function for reliable navigation
+    let success = await readiumViewController.go(to: locator, options: NavigatorGoOptions(animated: animated))
+    
+    if !success {
+      print(TAG, "goToLocator: Readium core navigation failed for \(locator.href)")
     }
   }
 
