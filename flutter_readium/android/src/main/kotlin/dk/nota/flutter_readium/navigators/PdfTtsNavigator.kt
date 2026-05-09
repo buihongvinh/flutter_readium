@@ -264,15 +264,14 @@ class PdfTtsNavigator(
     // ─── Private: TTS ─────────────────────────────────────────────────────────
 
     private fun applyPreferences() {
-        val preferredLanguage = preferences.language ?: preferences.voices?.keys?.firstOrNull()
-        val locale = preferences.language
+        val preferredLanguage = preferences.languageOverride ?: preferences.voices?.keys?.firstOrNull()
+        val locale = preferredLanguage
             ?.let { runCatching { Locale.forLanguageTag(it) }.getOrNull() }
-            ?: preferredLanguage
-                ?.let { runCatching { Locale.forLanguageTag(it) }.getOrNull() }
             ?: Locale.getDefault()
         tts?.language = locale
 
         val preferredVoiceId = preferences.voices?.get(locale.toLanguageTag())
+            ?: preferences.voices?.get(locale.language)
             ?: preferences.voices?.values?.firstOrNull()
         if (preferredVoiceId != null) {
             tts?.voices

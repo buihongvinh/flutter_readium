@@ -14,6 +14,7 @@ import androidx.fragment.app.commitNow
 import dk.nota.flutter_readium.events.ReadiumError
 import dk.nota.flutter_readium.events.ReadiumReaderStatus
 import dk.nota.flutter_readium.fragments.EpubReaderFragment
+import dk.nota.flutter_readium.fragments.PdfReaderFragment
 import dk.nota.flutter_readium.models.PageInformation
 import dk.nota.flutter_readium.navigators.EpubNavigator
 import io.flutter.plugin.common.BinaryMessenger
@@ -46,7 +47,8 @@ class ReadiumReaderWidget(
 ) : PlatformView,
     MethodChannel.MethodCallHandler,
     EpubReaderFragment.Listener,
-    EpubNavigator.VisualListener {
+    EpubNavigator.VisualListener,
+    PdfReaderFragment.Listener {
     private val channel: ReadiumReaderChannel
 
     /**
@@ -71,7 +73,10 @@ class ReadiumReaderWidget(
 
     override fun dispose() {
         Log.d(TAG, "::dispose")
+
+        // Đóng cả EPUB navigator lẫn PDF fragment nếu có
         ReadiumReader.epubClose()
+        closePdfFragment()
 
         ReadiumReader.emitReaderStatusUpdate(ReadiumReaderStatus.Closed)
         hasSentReady = false
@@ -130,24 +135,32 @@ class ReadiumReaderWidget(
             layout.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
         }
 
-        // Remove existing fragment if any (this is to avoid crashing on restore).
-        (fragmentManager.findFragmentByTag(NAVIGATOR_FRAGMENT_TAG) as? EpubReaderFragment)?.let { fragment ->
-            Log.d(TAG, "::init - remove existing fragment")
-
-            fragmentManager.commitNow {
-                remove(fragment)
-            }
+        // Remove existing fragments if any (this is to avoid crashing on restore).
+        fragmentManager.findFragmentByTag(NAVIGATOR_FRAGMENT_TAG)?.let { fragment ->
+            Log.d(TAG, "::init - remove existing navigator fragment")
+            fragmentManager.commitNow { remove(fragment) }
+        }
+        fragmentManager.findFragmentByTag(PDF_FRAGMENT_TAG)?.let { fragment ->
+            Log.d(TAG, "::init - remove existing PDF fragment")
+            fragmentManager.commitNow { remove(fragment) }
         }
 
         mainScope.launch {
             try {
-                ReadiumReader.epubEnable(
-                    initialLocator,
-                    initialPreferences,
-                    fragmentManager,
-                    layout,
-                    this@ReadiumReaderWidget,
-                )
+                // Kiểm tra xem publication hiện tại có phải PDF không để chọn navigator phù hợp.
+                if (ReadiumReader.isCurrentPublicationPdf()) {
+                    Log.d(TAG, "::init - publication la PDF, parse va hien thi qua text")
+                    enablePdfViewer(initialLocator)
+                } else {
+                    Log.d(TAG, "::init - publication là EPUB/WebPub, sử dụng EpubNavigator")
+                    ReadiumReader.epubEnable(
+                        initialLocator,
+                        initialPreferences,
+                        fragmentManager,
+                        layout,
+                        this@ReadiumReaderWidget,
+                    )
+                }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -212,6 +225,18 @@ class ReadiumReaderWidget(
             hasSentReady = true
         }
     }
+
+    suspend fun getFirstVisibleLocator(): Locator? =
+        withScope(mainScope) {
+            pdfFragment?.let { fragment ->
+                return@withScope createPdfLocator(
+                    pageIndex = fragment.getCurrentPage(),
+                    totalPages = fragment.getTotalPages(),
+                    metrics = fragment.getTextMetrics(),
+                )
+            }
+            ReadiumReader.epubFirstVisibleElementLocator()
+        }
 
     @Throws(IllegalArgumentException::class)
     private suspend fun setPreferencesFromMap(prefMap: Map<String, Any>) {
@@ -303,6 +328,12 @@ class ReadiumReaderWidget(
                         )
                     }
                     val locator = Locator.fromJSON(locatorJson)!!
+                    pdfFragment?.let { fragment ->
+                        val pageIndex = (locator.locations.position ?: 1) - 1
+                        fragment.goToPage(pageIndex)
+                        result.success(null)
+                        return@launch
+                    }
                     ReadiumReader.epubGoToLocator(locator, animated)
                     result.success(null)
                 }
@@ -350,11 +381,19 @@ class ReadiumReaderWidget(
      */
     private suspend fun goBackward(animated: Boolean) {
         Log.d(TAG, "::goBackward")
+        pdfFragment?.let { fragment ->
+            fragment.goToPage(fragment.getCurrentPage() - 1)
+            return
+        }
         ReadiumReader.epubGoBackward(animated)
     }
 
     private suspend fun goForward(animated: Boolean) {
         Log.d(TAG, "::goForward")
+        pdfFragment?.let { fragment ->
+            fragment.goToPage(fragment.getCurrentPage() + 1)
+            return
+        }
         ReadiumReader.epubGoForward(animated)
     }
 
@@ -374,7 +413,135 @@ class ReadiumReaderWidget(
         ReadiumReader.epubUpdatePreferences(preferences)
     }
 
+    // ─── PDF Support ─────────────────────────────────────────────────────────
+
+    /** Tham chiếu đến PdfReaderFragment đang active (nếu có). */
+    private var pdfFragment: PdfReaderFragment? = null
+
+    /**
+     * Khởi tạo và hiển thị [PdfReaderFragment] cho publication PDF theo luồng text.
+     *
+     * @param initialLocator  Locator ban đầu (hiện tại chỉ dùng để lấy trang đầu).
+     */
+    private suspend fun enablePdfViewer(initialLocator: org.readium.r2.shared.publication.Locator?) {
+        val filePath = ReadiumReader.getCurrentPdfFilePath()
+        if (filePath == null) {
+            Log.e(TAG, "enablePdfViewer: khong tim thay duong dan file PDF")
+            ReadiumReader.emitError(
+                message = "PDF file path not found. The publication URL could not be resolved to a local file path.",
+                code = "pdf_path_not_found",
+            )
+            ReadiumReader.emitReaderStatusUpdate(ReadiumReaderStatus.Error)
+            return
+        }
+
+        Log.d(TAG, "enablePdfViewer: $filePath")
+
+        // Lấy số trang ban đầu từ locator nếu có
+        val initialPage = initialLocator?.locations?.position?.let { it - 1 }?.coerceAtLeast(0) ?: 0
+
+        // Giữ tham số renderWidth để tương thích với factory hiện tại; fragment text không render bitmap.
+        val renderWidth = layout.width.takeIf { it > 0 } ?: 1080
+
+        val fragment = PdfReaderFragment.newInstance(
+            pdfFilePath = filePath,
+            initialPage = initialPage,
+            renderWidth = renderWidth,
+        ).also {
+            it.listener = this@ReadiumReaderWidget
+        }
+
+        pdfFragment = fragment
+
+        ReadiumReader.emitReaderStatusUpdate(ReadiumReaderStatus.Loading)
+
+        // Dùng overload add(ViewGroup, Fragment, tag) thay vì add(containerViewId, Fragment, tag)
+        // để tránh lỗi "Invalid resource ID" khi layout chưa được attach vào Activity hierarchy.
+        // Pattern này giống EPUB: epubNavigator.attachNavigator(fragmentManager, viewGroup)
+        // cũng gọi fragmentManager.commitNow { add(viewGroup, navigator, tag) }.
+        fragmentManager.commitNow {
+            add(layout, fragment, PDF_FRAGMENT_TAG)
+        }
+    }
+
+    /** Đóng và xóa PdfReaderFragment nếu đang hiển thị. */
+    private fun closePdfFragment() {
+        pdfFragment?.let { fragment ->
+            if (fragment.isAdded) {
+                fragmentManager.commitNow { remove(fragment) }
+            }
+            pdfFragment = null
+            Log.d(TAG, "closePdfFragment: đã đóng PDF fragment")
+        }
+    }
+
+    // ─── PdfReaderFragment.Listener ──────────────────────────────────────────
+
+    override fun onPdfReady() {
+        Log.d(TAG, "onPdfReady")
+        if (!hasSentReady) {
+            hasSentReady = true
+            ReadiumReader.emitReaderStatusUpdate(ReadiumReaderStatus.Ready)
+        }
+    }
+
+    override fun onPdfError(message: String) {
+        Log.e(TAG, "onPdfError: $message")
+        ReadiumReader.emitReaderStatusUpdate(ReadiumReaderStatus.Error)
+    }
+
+    override fun onPdfPageChanged(pageIndex: Int, totalPages: Int) {
+        Log.d(TAG, "onPdfPageChanged: page ${pageIndex + 1}/$totalPages")
+        val locator = createPdfLocator(pageIndex, totalPages, pdfFragment?.getTextMetrics(pageIndex))
+        if (locator != null) {
+            channel.onPageChanged(locator)
+            ReadiumReader.emitTextLocatorUpdate(locator)
+        } else {
+            Log.w(TAG, "onPdfPageChanged: khong the tao Locator tu PDF text page")
+        }
+    }
+
+    private fun createPdfLocator(
+        pageIndex: Int,
+        totalPages: Int,
+        metrics: PdfReaderFragment.PdfTextMetrics? = null,
+    ): Locator? {
+        val hrefStr = ReadiumReader.currentPublication
+            ?.readingOrder
+            ?.firstOrNull()
+            ?.url()
+            ?.toString()
+            ?: ReadiumReader.currentPublicationUrl
+            ?: return null
+
+        val progression = if (totalPages > 0) pageIndex.toDouble() / totalPages else 0.0
+        val fragments = org.json.JSONArray().apply {
+            put("page=${pageIndex + 1}")
+            put("totalPages=$totalPages")
+            metrics?.let {
+                put("textHeight=${it.textHeight}")
+                put("heightText=${it.textHeight}")
+                put("viewportHeight=${it.viewportHeight}")
+                put("scrollY=${it.scrollY}")
+                put("pageTop=${it.pageTop}")
+                put("pageHeight=${it.pageHeight}")
+            }
+        }
+        val locatorJson = org.json.JSONObject().apply {
+            put("href", hrefStr)
+            put("type", "application/pdf")
+            put("locations", org.json.JSONObject().apply {
+                put("position", pageIndex + 1)
+                put("totalProgression", progression)
+                put("progression", progression)
+                put("fragments", fragments)
+            })
+        }
+        return Locator.fromJSON(locatorJson)
+    }
+
     companion object {
         const val NAVIGATOR_FRAGMENT_TAG = "NAVIGATOR_READER_FRAGMENT"
+        const val PDF_FRAGMENT_TAG = "PDF_READER_FRAGMENT"
     }
 }

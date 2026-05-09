@@ -4,6 +4,7 @@ import ReadiumShared
 import Flutter
 import UIKit
 import WebKit
+import PDFKit
 
 private let ReadiumReaderStatusReady = "ready"
 private let ReadiumReaderStatusLoading = "loading"
@@ -11,6 +12,7 @@ private let ReadiumReaderStatusClosed = "closed"
 private let ReadiumReaderStatusError = "error"
 
 let readiumReaderViewType = "dk.nota.flutter_readium/ReadiumReaderWidget"
+private let allowedInitialFragments = ["id", "t", "viewrect", "xywh"]
 
 class ReadiumBugLogger: ReadiumShared.WarningLogger {
   func log(_ warning: Warning) {
@@ -29,11 +31,24 @@ private func emitReaderStatusChanged(status: String) {
   }
 }
 
-public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDelegate, VisualNavigatorDelegate {
+public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDelegate, VisualNavigatorDelegate, UIScrollViewDelegate {
 
   private let channel: ReadiumReaderChannel
   private let _view: UIView
-  private let readiumViewController: EPUBNavigatorViewController
+
+  /// EPUB navigator, initialized for EPUB/WebPub publications.
+  private var epubNavigatorViewController: EPUBNavigatorViewController?
+
+  /// PDF text reader, initialized for PDF publications.
+  private var pdfTextScrollView: UIScrollView?
+  private var pdfTextStackView: UIStackView?
+  private var pdfTextPageViews: [UIView] = []
+  private var pdfTextPublication: Publication?
+  private var pdfTextPageCount = 0
+  private var pdfTextCurrentPageIndex = 0
+  private var pdfTextIsProgrammaticScroll = false
+
+  private var isVerticalScroll = false
   private var hasSentReady = false
   private var isJumpingToLocator = false
   private var lastHrefLocation: String?
@@ -49,8 +64,8 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
 
   deinit {
     Log.reader.info("dispose")
-    readiumViewController.view.removeFromSuperview()
-    readiumViewController.delegate = nil
+    epubNavigatorViewController?.view.removeFromSuperview()
+    epubNavigatorViewController?.delegate = nil
     channel.setMethodCallHandler(nil)
     FlutterReadiumPlugin.instance?.setCurrentReadiumReaderView(nil)
   }
@@ -72,8 +87,12 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
     self.preferences = preferencesMap == nil ? FlutterEPUBPreferences.init() : FlutterEPUBPreferences.init(fromMap: preferencesMap!!)
 
     let locatorStr = creationParams["initialLocator"] as? String
-    let locator = locatorStr == nil ? nil : try! Locator.init(jsonString: locatorStr!)
+    var locator = locatorStr == nil ? nil : try! Locator.init(jsonString: locatorStr!)
     Log.reader.debug("publication = \(publication)")
+
+    // TODO: Our custom fragments (particularly page=x) messes up the in-chapter location.
+    // only allow whitelist from https://readium.org/architecture/models/locators/best-practices/format.html
+    locator?.locations.fragments.removeAll(where: { !allowedInitialFragments.contains(String($0.split(separator: "=").first ?? "none")) })
 
     channel = ReadiumReaderChannel(
       name: "\(readiumReaderViewType):\(viewId)", binaryMessenger: registrar.messenger())
@@ -83,8 +102,37 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
     Log.reader.info("Publication: (identifier=\(String(describing: publication.metadata.identifier)),title=\(String(describing: publication.metadata.title)))")
     Log.reader.info("Added publication at \(String(describing: publication.baseURL))")
 
+    _view = UIView()
+    super.init()
+
+    channel.setMethodCallHandler(onMethodCall)
+
+    // ── Phân nhánh theo loại publication ──────────────────────────────────────
+    // Dùng isPdfPublication() để kiểm tra qua mediaType (không phụ thuộc vào Publication.Profile.pdf)
+    if isPdfPublication(publication) {
+      Log.reader.debug("init - PDF publication, using text reader")
+      initPdfTextReader(publication: publication, locator: locator)
+    } else {
+      Log.reader.debug("init - EPUB/WebPub publication, using EPUBNavigatorViewController")
+      initEpubNavigator(
+        publication: publication,
+        locator: locator,
+        registrar: registrar
+      )
+    }
+
+    FlutterReadiumPlugin.instance?.setCurrentReadiumReaderView(self)
+    Log.reader.debug("init success")
+  }
+
+  // ── Khởi tạo EPUB Navigator ─────────────────────────────────────────────────
+
+  private func initEpubNavigator(
+    publication: Publication,
+    locator: Locator?,
+    registrar: FlutterPluginRegistrar
+  ) {
     // Remove undocumented Readium default 20dp or 44dp top/bottom padding.
-    // See EPUBNavigatorViewController.swift in r2-navigator-swift.
     var config = EPUBNavigatorViewController.Configuration()
 
     // TODO: Use config.readiumCSSRSProperties.overrides to add custom CSS variables
@@ -94,8 +142,6 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
       .compact: (top: 0, bottom: 0),
       .regular: (top: 0, bottom: 0),
     ]
-    // TODO: Make this config configurable from Flutter
-    // Might want it to be higher for a local publication than remote. Default is 2 previous and 6 next resources.
     config.preloadPreviousPositionCount = 2
     config.preloadNextPositionCount = 4
     config.debugState = false
@@ -111,48 +157,389 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
       config.preferences = readiumPreferences
     }
 
-    readiumViewController = try! EPUBNavigatorViewController(
+    let navigator = try! EPUBNavigatorViewController(
       publication: publication,
       initialLocation: locator,
       config: config,
       httpServer: sharedReadium.httpServer!
     )
 
-    _view = UIView()
-    super.init()
-
-    channel.setMethodCallHandler(onMethodCall)
-    readiumViewController.delegate = self
-
-    let child: UIView = readiumViewController.view
-    let view = _view
-    view.addSubview(readiumViewController.view)
-
-    child.translatesAutoresizingMaskIntoConstraints = false
-
-    NSLayoutConstraint.activate(
-      [
-        child.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-        child.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-        child.topAnchor.constraint(equalTo: view.topAnchor),
-        child.bottomAnchor.constraint(equalTo: view.bottomAnchor)
-      ]
-    )
-
-    FlutterReadiumPlugin.instance?.setCurrentReadiumReaderView(self)
-
-    /// Ensure userScripts are initialized for later injection.
     if userScripts.isEmpty {
-      self.initUserScripts(registrar: registrar)
+      initUserScripts(registrar: registrar)
     }
 
-    /// This adapter will automatically turn pages when the user taps the
-    /// screen edges or presses arrow keys.
+    epubNavigatorViewController = navigator
+    navigator.delegate = self
+
+    embedChildView(navigator.view)
+
     DirectionalNavigationAdapter(
       pointerPolicy: .init(types: [.mouse, .touch])
-    ).bind(to: readiumViewController)
+    ).bind(to: navigator)
+  }
 
-    Log.reader.debug("init success")
+  // ── Khởi tạo PDF text reader ────────────────────────────────────────────────
+
+  private struct PdfTextPage {
+    let pageIndex: Int
+    let totalPages: Int
+    let text: String
+  }
+
+  private func initPdfTextReader(publication: Publication, locator: Locator?) {
+    pdfTextPublication = publication
+    pdfTextCurrentPageIndex = max((locator?.locations.position ?? 1) - 1, 0)
+
+    let scrollView = UIScrollView()
+    scrollView.alwaysBounceVertical = true
+    scrollView.backgroundColor = .systemBackground
+    scrollView.delegate = self
+    // FIX: Tắt delay để UITextView nhận touch ngay – cần thiết cho text selection/highlight.
+    scrollView.delaysContentTouches = false
+
+    let stackView = UIStackView()
+    stackView.axis = .vertical
+    stackView.spacing = 14
+    stackView.isLayoutMarginsRelativeArrangement = true
+    stackView.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 18, leading: 18, bottom: 28, trailing: 18)
+
+    scrollView.addSubview(stackView)
+    stackView.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      stackView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+      stackView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+      stackView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+      stackView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+      stackView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+    ])
+
+    pdfTextScrollView = scrollView
+    pdfTextStackView = stackView
+    embedChildView(scrollView)
+
+    let indicator = UIActivityIndicatorView(style: .large)
+    indicator.startAnimating()
+    _view.addSubview(indicator)
+    indicator.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      indicator.centerXAnchor.constraint(equalTo: _view.centerXAnchor),
+      indicator.centerYAnchor.constraint(equalTo: _view.centerYAnchor),
+    ])
+
+    Task.detached(priority: .userInitiated) { [weak self] in
+      do {
+        guard let self = self else { return }
+        let pages = try await self.extractPdfTextPages(publication: publication)
+        await MainActor.run {
+          indicator.removeFromSuperview()
+          self.populatePdfTextPages(pages, initialPage: self.pdfTextCurrentPageIndex)
+        }
+      } catch {
+        await MainActor.run {
+          indicator.removeFromSuperview()
+          Log.reader.error("initPdfTextReader failed: \(error)")
+          emitReaderStatusChanged(status: ReadiumReaderStatusError)
+          let payload = FlutterReadiumError(message: "Loi parse text PDF: \(error.localizedDescription)", code: "pdf_text_parse_error", data: nil)
+          FlutterReadiumPlugin.instance?.errorStreamHandler?.sendEvent(
+            payload.toJsonString()
+          )
+        }
+      }
+    }
+  }
+
+  private func populatePdfTextPages(_ pages: [PdfTextPage], initialPage: Int) {
+    guard let stackView = pdfTextStackView, let scrollView = pdfTextScrollView else { return }
+
+    pdfTextPageViews.removeAll()
+    stackView.arrangedSubviews.forEach { view in
+      stackView.removeArrangedSubview(view)
+      view.removeFromSuperview()
+    }
+
+    pdfTextPageCount = pages.first?.totalPages ?? 0
+
+    if pages.isEmpty || pdfTextPageCount == 0 {
+      emitReaderStatusChanged(status: ReadiumReaderStatusError)
+      let payload = FlutterReadiumError(message: "PDF khong co trang nao de parse text.", code: "pdf_no_pages", data: nil)
+      FlutterReadiumPlugin.instance?.errorStreamHandler?.sendEvent(
+        payload.toJsonString()
+      )
+      return
+    }
+
+    for page in pages {
+      let pageView = makePdfTextPageView(page)
+      pdfTextPageViews.append(pageView)
+      stackView.addArrangedSubview(pageView)
+    }
+
+    let targetPage = min(max(initialPage, 0), max(pdfTextPageCount - 1, 0))
+    pdfTextCurrentPageIndex = targetPage
+    scrollView.layoutIfNeeded()
+    scrollToPdfTextPage(targetPage, animated: false)
+    emitPdfTextPageChanged(pageIndex: targetPage)
+  }
+
+  private func makePdfTextPageView(_ page: PdfTextPage) -> UIView {
+    let container = UIStackView()
+    container.axis = .vertical
+    container.spacing = 8
+    container.isLayoutMarginsRelativeArrangement = true
+    container.directionalLayoutMargins = NSDirectionalEdgeInsets(top: 10, leading: 0, bottom: 12, trailing: 0)
+
+    let header = UILabel()
+    header.text = "Trang \(page.pageIndex + 1) / \(page.totalPages)"
+    header.font = .preferredFont(forTextStyle: .footnote)
+    header.textColor = .secondaryLabel
+
+    let textView = UITextView()
+    textView.isEditable = false
+    textView.isSelectable = true
+    textView.isUserInteractionEnabled = true
+    textView.isScrollEnabled = false
+    textView.backgroundColor = .clear
+    textView.textContainerInset = .zero
+    textView.textContainer.lineFragmentPadding = 0
+    textView.font = .preferredFont(forTextStyle: .body)
+    textView.adjustsFontForContentSizeCategory = true
+    textView.textColor = .label
+    textView.text = page.text.isEmpty ? "" : page.text
+
+    container.addArrangedSubview(header)
+    container.addArrangedSubview(textView)
+    return container
+  }
+
+  private enum PdfTextReaderError: LocalizedError {
+    case noPdfLink
+    case invalidURL(String)
+    case cannotOpenPdf(String)
+
+    var errorDescription: String? {
+      switch self {
+      case .noPdfLink:
+        return "Khong tim thay link PDF trong publication readingOrder"
+      case .invalidURL(let url):
+        return "URL PDF khong hop le: \(url)"
+      case .cannotOpenPdf(let path):
+        return "Khong the mo file PDF: \(path)"
+      }
+    }
+  }
+
+  private func extractPdfTextPages(publication: Publication) async throws -> [PdfTextPage] {
+    guard let pdfLink = publication.readingOrder.first else {
+      throw PdfTextReaderError.noPdfLink
+    }
+
+    // Lấy URL trực tiếp (Foundation URL) – tránh roundtrip qua absoluteString
+    // vì URL(string:) có thể fail khi tên file chứa ký tự đặc biệt / tiếng Việt.
+    let linkURLString = pdfLink.url().string
+    let pdfURL: URL
+
+    if let linkURL = URL(string: linkURLString), linkURL.isFileURL {
+      pdfURL = linkURL
+    } else if let linkURL = URL(string: linkURLString),
+              ["http", "https"].contains(linkURL.scheme?.lowercased() ?? "") {
+      pdfURL = try await downloadPdfToTemp(url: linkURL)
+    } else if linkURLString.hasPrefix("/") {
+      pdfURL = URL(fileURLWithPath: linkURLString)
+    } else {
+      throw PdfTextReaderError.invalidURL(linkURLString)
+    }
+
+    // Thử load từ cache trước – tránh parse lại mỗi lần mở.
+    if let cached = PdfTextCache.load(for: pdfURL) {
+      return cached.map { PdfTextPage(pageIndex: $0.pageIndex, totalPages: $0.totalPages, text: $0.text) }
+    }
+
+    // Cache miss → extract từ PDFKit.
+    let pages = try await Task.detached(priority: .userInitiated) {
+      guard let document = PDFDocument(url: pdfURL) else {
+        throw PdfTextReaderError.cannotOpenPdf(pdfURL.path)
+      }
+
+      let totalPages = document.pageCount
+      return (0 ..< totalPages).map { pageIndex in
+        let pageText = document.page(at: pageIndex)?.string ?? ""
+        return PdfTextPage(
+          pageIndex: pageIndex,
+          totalPages: totalPages,
+          text: pageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        )
+      }
+    }.value
+
+    // Lưu cache để lần sau mở không cần parse lại.
+    let toCache = pages.map { PdfTextCache.CachedPage(pageIndex: $0.pageIndex, totalPages: $0.totalPages, text: $0.text) }
+    PdfTextCache.save(toCache, for: pdfURL)
+
+    return pages
+  }
+
+  private func downloadPdfToTemp(url: URL) async throws -> URL {
+    let (localURL, _) = try await URLSession.shared.download(from: url)
+    let tempURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString + ".pdf")
+    try FileManager.default.moveItem(at: localURL, to: tempURL)
+    return tempURL
+  }
+
+  private func scrollToPdfTextPage(_ pageIndex: Int, animated: Bool) {
+    guard let scrollView = pdfTextScrollView,
+          let stackView = pdfTextStackView,
+          pageIndex >= 0,
+          pageIndex < pdfTextPageViews.count
+    else { return }
+
+    let pageView = pdfTextPageViews[pageIndex]
+    let frame = pageView.convert(pageView.bounds, to: stackView)
+    let minOffsetY = -scrollView.adjustedContentInset.top
+    let maxOffsetY = max(
+      minOffsetY,
+      scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+    )
+    let offsetY = min(max(stackView.frame.minY + frame.minY - 8, minOffsetY), maxOffsetY)
+
+    pdfTextIsProgrammaticScroll = animated
+    scrollView.setContentOffset(CGPoint(x: 0, y: offsetY), animated: animated)
+    if !animated {
+      pdfTextIsProgrammaticScroll = false
+    }
+  }
+
+  public func scrollViewDidScroll(_ scrollView: UIScrollView) {
+    guard scrollView === pdfTextScrollView, !pdfTextIsProgrammaticScroll else { return }
+    updatePdfTextCurrentPageFromScroll()
+  }
+
+  public func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) {
+    guard scrollView === pdfTextScrollView else { return }
+    pdfTextIsProgrammaticScroll = false
+    updatePdfTextCurrentPageFromScroll()
+  }
+
+  private func updatePdfTextCurrentPageFromScroll() {
+    guard let scrollView = pdfTextScrollView,
+          let stackView = pdfTextStackView,
+          !pdfTextPageViews.isEmpty else { return }
+
+    let markerY = scrollView.contentOffset.y + (scrollView.bounds.height * 0.25)
+    var visiblePage = pdfTextCurrentPageIndex
+
+    for (index, pageView) in pdfTextPageViews.enumerated() {
+      let frame = pageView.convert(pageView.bounds, to: stackView)
+      if markerY >= stackView.frame.minY + frame.minY {
+        visiblePage = index
+      } else {
+        break
+      }
+    }
+
+    if visiblePage != pdfTextCurrentPageIndex {
+      pdfTextCurrentPageIndex = visiblePage
+      emitPdfTextPageChanged(pageIndex: visiblePage)
+    }
+  }
+
+  private func emitPdfTextPageChanged(pageIndex: Int) {
+    guard let locator = buildPdfTextLocator(pageIndex: pageIndex) else { return }
+
+    if !hasSentReady {
+      emitReaderStatusChanged(status: ReadiumReaderStatusReady)
+      hasSentReady = true
+    }
+
+    channel.onPageChanged(locator: locator)
+    FlutterReadiumPlugin.instance?.textLocatorStreamHandler?
+      .sendEvent(locator.jsonString)
+  }
+
+  private func buildPdfTextLocator(pageIndex: Int) -> Locator? {
+    guard let publication = pdfTextPublication,
+          let link = publication.readingOrder.first else {
+      return nil
+    }
+
+    let page = min(max(pageIndex, 0), max(pdfTextPageCount - 1, 0))
+    let progression = pdfTextPageCount > 0 ? Double(page) / Double(pdfTextPageCount) : 0.0
+
+    return Locator(
+      href: link.url(),
+      mediaType: link.mediaType ?? .pdf,
+      locations: .init(
+        fragments: pdfTextMetricFragments(pageIndex: page),
+        progression: progression,
+        totalProgression: progression,
+        position: page + 1
+      )
+    )
+  }
+
+  private func pdfTextMetricFragments(pageIndex: Int) -> [String] {
+    let page = min(max(pageIndex, 0), max(pdfTextPageCount - 1, 0))
+    var fragments = [
+      "page=\(page + 1)",
+      "totalPages=\(pdfTextPageCount)",
+    ]
+
+    guard let scrollView = pdfTextScrollView,
+          let stackView = pdfTextStackView,
+          page >= 0,
+          page < pdfTextPageViews.count else {
+      return fragments
+    }
+
+    scrollView.layoutIfNeeded()
+    stackView.layoutIfNeeded()
+
+    let pageView = pdfTextPageViews[page]
+    let pageFrame = pageView.convert(pageView.bounds, to: stackView)
+    let pageTop = stackView.frame.minY + pageFrame.minY
+
+    fragments.append("textHeight=\(Int(scrollView.contentSize.height.rounded()))")
+    fragments.append("heightText=\(Int(scrollView.contentSize.height.rounded()))")
+    fragments.append("viewportHeight=\(Int(scrollView.bounds.height.rounded()))")
+    fragments.append("scrollY=\(Int(scrollView.contentOffset.y.rounded()))")
+    fragments.append("pageTop=\(Int(pageTop.rounded()))")
+    fragments.append("pageHeight=\(Int(pageFrame.height.rounded()))")
+
+    return fragments
+  }
+
+  private func clearPdfTextReader() {
+    pdfTextScrollView?.delegate = nil
+    pdfTextScrollView?.removeFromSuperview()
+    pdfTextScrollView = nil
+    pdfTextStackView = nil
+    pdfTextPageViews.removeAll()
+    pdfTextPublication = nil
+    pdfTextPageCount = 0
+    pdfTextCurrentPageIndex = 0
+    pdfTextIsProgrammaticScroll = false
+  }
+
+  // ── Helper: Nhúng view của navigator vào _view ──────────────────────────────
+
+  private func embedChildView(_ child: UIView) {
+    let view = _view
+    view.addSubview(child)
+    child.translatesAutoresizingMaskIntoConstraints = false
+    NSLayoutConstraint.activate([
+      child.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      child.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      child.topAnchor.constraint(equalTo: view.topAnchor),
+      child.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+    ])
+  }
+
+  // ── Helper: Kiểm tra PDF publication ───────────────────────────────────────
+
+  /// Kiểm tra publication có phải PDF không qua readingOrder media type.
+  private func isPdfPublication(_ publication: Publication) -> Bool {
+    let firstItemType = publication.readingOrder.first?.mediaType?.string ?? ""
+    return firstItemType.lowercased().contains("pdf")
   }
 
   @objc public func onCustomEditingAction() {
@@ -161,10 +548,10 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
     // Because of how Flutter generates its responder chain, we need to implement this func in the client AppDelegate.swift and then call back into the plugin from there.
     // see https://github.com/readium/swift-toolkit/issues/466
 
-    if let selection = readiumViewController.currentSelection {
+    if let epub = epubNavigatorViewController, let selection = epub.currentSelection {
       let selectionLocator = selection.locator
-      readiumViewController.apply(decorations: [Decoration(id: "highlight", locator: selectionLocator, style: .highlight(), userInfo: [:])], in: "user-highlight")
-      readiumViewController.clearSelection()
+      epub.apply(decorations: [Decoration(id: "highlight", locator: selectionLocator, style: .highlight(), userInfo: [:])], in: "user-highlight")
+      epub.clearSelection()
     }
   }
 
@@ -256,23 +643,32 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
 
   func applyDecorations(_ decorations: [Decoration], forGroup groupIdentifier: String) {
     Log.reader.debug("applyDecorations: \(decorations) identifier: \(groupIdentifier)")
-    self.readiumViewController.apply(decorations: decorations, in: groupIdentifier)
+    epubNavigatorViewController?.apply(decorations: decorations, in: groupIdentifier)
   }
 
   func getFirstVisibleLocator() async -> Locator? {
-    return await self.readiumViewController.firstVisibleElementLocator()
+    if let epub = epubNavigatorViewController {
+      return await epub.firstVisibleElementLocator()
+    }
+    return buildPdfTextLocator(pageIndex: pdfTextCurrentPageIndex)
   }
 
   func getCurrentLocation() -> Locator? {
-    return self.readiumViewController.currentLocation
+    return epubNavigatorViewController?.currentLocation
+      ?? buildPdfTextLocator(pageIndex: pdfTextCurrentPageIndex)
   }
 
   func getCurrentSelection() -> Locator? {
-    return self.readiumViewController.currentSelection?.locator
+    return epubNavigatorViewController?.currentSelection?.locator
   }
 
   private func evaluateJavascript(_ code: String) async -> Result<Any, Error> {
-    return await self.readiumViewController.evaluateJavaScript(code)
+    guard let epub = epubNavigatorViewController else {
+      // PDF không hỗ trợ JavaScript
+      return .failure(NSError(domain: "ReadiumReaderView", code: -1,
+        userInfo: [NSLocalizedDescriptionKey: "JavaScript khong kha dung cho PDF text reader"]))
+    }
+    return await epub.evaluateJavaScript(code)
   }
 
   private func evaluateJSReturnResult(_ code: String, result: @escaping FlutterResult) {
@@ -293,7 +689,8 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
   }
 
   private func setUserPreferences(preferences: FlutterEPUBPreferences) {
-    self.readiumViewController.submitPreferences(preferences.readium)
+    isVerticalScroll = preferences.readium.scroll ?? false
+    epubNavigatorViewController?.submitPreferences(preferences.readium)
     self.updateCustomPreferences(preferences)
   }
 
@@ -303,7 +700,7 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
        let jsonData = try? jsonEncoder.encode(cssVariables),
        let jsonString = String(data: jsonData, encoding: .utf8) {
       Task.detached(priority: .high) { [jsonString] in
-        let result = await self.readiumViewController.evaluateJavaScript("readium.setCSSProperties(\(jsonString));")
+        let result = await self.epubNavigatorViewController?.evaluateJavaScript("readium.setCSSProperties(\(jsonString));")
         Log.reader.info("updated custom preferences: \(result)")
       }
     }
@@ -352,21 +749,54 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
     }
   }
 
+  @MainActor
+  private func goToPdfTextLocator(locator: Locator, animated: Bool) -> Bool {
+    guard pdfTextScrollView != nil, pdfTextPageCount > 0 else { return false }
+
+    let pageIndex = min(max((locator.locations.position ?? 1) - 1, 0), pdfTextPageCount - 1)
+    pdfTextCurrentPageIndex = pageIndex
+    scrollToPdfTextPage(pageIndex, animated: animated)
+    emitPdfTextPageChanged(pageIndex: pageIndex)
+    return true
+  }
+
+  @MainActor
+  private func goToPdfTextPageOffset(_ offset: Int, animated: Bool) -> Bool {
+    guard pdfTextScrollView != nil, pdfTextPageCount > 0 else { return false }
+
+    let pageIndex = min(max(pdfTextCurrentPageIndex + offset, 0), pdfTextPageCount - 1)
+    pdfTextCurrentPageIndex = pageIndex
+    scrollToPdfTextPage(pageIndex, animated: animated)
+    emitPdfTextPageChanged(pageIndex: pageIndex)
+    return true
+  }
+
   func goToLocator(_ locator: Locator, animated: Bool) async -> Bool {
     Log.reader.debug("goToLocator: \(locator)")
-    
-    isJumpingToLocator = true
-
-    return await readiumViewController.go(to: locator, options: NavigatorGoOptions(animated: animated))
+    if let epub = epubNavigatorViewController {
+      isJumpingToLocator = true
+      return await epub.go(to: locator, options: NavigatorGoOptions(animated: animated))
+    }
+    if pdfTextScrollView != nil {
+      return await goToPdfTextLocator(locator: locator, animated: animated)
+    }
+    return false
   }
 
   func goToProgression(_ progression: Double, animated: Bool) async -> Bool {
     Log.reader.debug("goToProgression:\(progression)")
-    guard let locator = getCurrentLocation() else {
-      return false
+    if let epub = epubNavigatorViewController {
+      guard let locator = epub.currentLocation ?? getCurrentLocation() else {
+        return false
+      }
+      let newLocator = locator.copyWithProgressionLocations(progression: progression)
+      return await epub.go(to: newLocator, options: NavigatorGoOptions(animated: animated))
     }
-    let newLocator = locator.copyWithProgressionLocations(progression: progression)
-    return await readiumViewController.go(to: newLocator, options: NavigatorGoOptions(animated: animated))
+    if pdfTextScrollView != nil {
+      let targetPage = Int((Double(max(pdfTextPageCount - 1, 0)) * progression).rounded())
+      return await goToPdfTextPageOffset(targetPage - pdfTextCurrentPageIndex, animated: animated)
+    }
+    return false
   }
 
 
@@ -378,18 +808,28 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
     Log.reader.debug("syncToLocator: \(locator)")
     if let duration = segmentDuration {
       let segmentDurationMs = duration * 1000.0
-      await readiumViewController.evaluateJavaScript("window.flutterReadium.setSegmentDuration(\(segmentDurationMs));");
+      await epubNavigatorViewController?.evaluateJavaScript("window.flutterReadium.setSegmentDuration(\(segmentDurationMs));");
     }
     return await goToLocator(locator, animated: animated)
   }
 
   private func emitOnPageChanged() {
-    guard let locator = readiumViewController.currentLocation else {
-      Log.reader.warn("emitOnPageChanged: currentLocation was nil!")
+    if let epub = epubNavigatorViewController, let locator = epub.currentLocation {
+      Log.reader.debug("emitOnPageChanged: Calling navigator:locationDidChange.")
+      navigator(epub, locationDidChange: locator)
       return
     }
 
-    navigator(readiumViewController, locationDidChange: locator)
+    if pdfTextScrollView != nil {
+      emitPdfTextPageChanged(pageIndex: pdfTextCurrentPageIndex)
+      return
+    }
+
+    guard let locator = getCurrentLocation() else {
+      Log.reader.warn("emitOnPageChanged: currentLocation was nil!")
+      return
+    }
+    Log.reader.debug("emitOnPageChanged: locator=\(locator)")
   }
 
   func onMethodCall(call: FlutterMethodCall, result: @escaping FlutterResult) {
@@ -410,39 +850,45 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
     case "goBackward":
       let animated = call.arguments as! Bool
       let navOptions = NavigatorGoOptions(animated: animated)
-      let readiumViewController = self.readiumViewController
-      let scrollMode = self.readiumViewController.presentation.scroll
+      let epub = self.epubNavigatorViewController
+      let scrollMode = epub?.presentation.scroll
+      let hasPdfTextReader = self.pdfTextScrollView != nil
 
       Task.detached(priority: .high) {
-        let layoutMode = await self.readiumViewController.publication.metadata.layout ?? Layout.reflowable
-        let success: Bool
-        if (layoutMode == .reflowable && scrollMode == true) {
-          success = await self.goBackwardInScrollMode(options: navOptions)
-        } else {
-          success = await readiumViewController.goBackward(options: navOptions)
+        var success = false
+        if let epub = epub {
+          let layoutMode = await epub.publication.metadata.layout ?? Layout.reflowable
+          if (layoutMode == .reflowable && scrollMode == true) {
+            success = await self.goBackwardInScrollMode(options: navOptions)
+          } else {
+            success = await epub.goBackward(options: navOptions)
+          }
+        } else if hasPdfTextReader {
+          success = await self.goToPdfTextPageOffset(-1, animated: animated)
         }
-        await MainActor.run() {
-          result(success)
-        }
+        await MainActor.run() { result(success) }
       }
       break
     case "goForward":
       let animated = call.arguments as! Bool
       let navOptions = NavigatorGoOptions(animated: animated)
-      let readiumViewController = self.readiumViewController
-      let scrollMode = self.readiumViewController.presentation.scroll
+      let epub = self.epubNavigatorViewController
+      let scrollMode = epub?.presentation.scroll
+      let hasPdfTextReader = self.pdfTextScrollView != nil
 
       Task.detached(priority: .high) {
-        let layoutMode = await self.readiumViewController.publication.metadata.layout ?? Layout.reflowable
-        let success: Bool
-        if (layoutMode == .reflowable && scrollMode == true) {
-          success = await self.goForwardInScrollMode(options: navOptions)
-        } else {
-          success = await readiumViewController.goForward(options: navOptions)
+        var success = false
+        if let epub = epub {
+          let layoutMode = await epub.publication.metadata.layout ?? Layout.reflowable
+          if (layoutMode == .reflowable && scrollMode == true) {
+            success = await self.goForwardInScrollMode(options: navOptions)
+          } else {
+            success = await epub.goForward(options: navOptions)
+          }
+        } else if hasPdfTextReader {
+          success = await self.goToPdfTextPageOffset(1, animated: animated)
         }
-        await MainActor.run() {
-          result(success)
-        }
+        await MainActor.run() { result(success) }
       }
       break
     case "setPreferences":
@@ -467,9 +913,11 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
       applyDecorations(decorations, forGroup: identifier)
       break
     case "dispose":
-      Log.reader.info("Disposing readiumViewController")
-      readiumViewController.view.removeFromSuperview()
-      readiumViewController.delegate = nil
+      Log.reader.info("Disposing navigator view controllers")
+      epubNavigatorViewController?.view.removeFromSuperview()
+      epubNavigatorViewController?.delegate = nil
+      epubNavigatorViewController = nil
+      clearPdfTextReader()
       emitReaderStatusChanged(status: ReadiumReaderStatusClosed)
       result(nil)
       break
@@ -512,7 +960,7 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
 
     /// Add all known ToC IDs for this publication to a global javascript array.
     do {
-      let tocFragments = self.readiumViewController.publication.getFlattenedToC().compactMap(\.fragment)
+      let tocFragments = self.publication.getFlattenedToC().compactMap(\.fragment)
       let data = try jsonEncoder.encode(tocFragments)
       if let tocFragmentsJSON = String(data: data, encoding: String.Encoding.utf8) {
         let tocScript = "window.readiumTocIDs = \(tocFragmentsJSON);"
@@ -531,6 +979,9 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
   }
 
   func goBackwardInScrollMode(options: NavigatorGoOptions) async -> Bool {
+    guard let epub = epubNavigatorViewController else {
+      return false
+    }
     guard var locator = getCurrentLocation(),
           let currentProgression = locator.locations.progression else {
       Log.reader.error("no current location or progression")
@@ -549,15 +1000,18 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
       // Current progress is already at the top and prevProgression is <= 0.0,
       // We need to go to the previous file in the readingOrder.
       Log.reader.debug("at beginning, use default goBackward")
-      return await self.readiumViewController.goBackward(options: options)
+      return await epub.goBackward(options: options)
     }
 
     Log.reader.debug("goBackward from progression:\(currentProgression) to \(prevProgression)")
     locator.locations.progression = clamp(prevProgression, minValue: 0.0, maxValue: 1.0)
-    return await self.readiumViewController.go(to: locator, options: options)
+    return await epub.go(to: locator, options: options)
   }
 
   func goForwardInScrollMode(options: NavigatorGoOptions) async -> Bool {
+    guard let epub = epubNavigatorViewController else {
+      return false
+    }
     guard var locator = getCurrentLocation(),
           let currentProgression = locator.locations.progression else {
       Log.reader.error("no current location or progression")
@@ -577,11 +1031,11 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
       // Current progress is already at the top and prevProgression is <= 0.0,
       // We need to go to the previous file in the readingOrder.
       Log.reader.debug("at end, use default goForward")
-      return await self.readiumViewController.goForward(options: options)
+      return await epub.goForward(options: options)
     }
 
     Log.reader.debug("goForward from progression:\(currentProgression) to \(nextProgression)")
     locator.locations.progression = clamp(nextProgression, minValue: 0.0, maxValue: 1.0)
-    return await self.readiumViewController.go(to: locator, options: options)
+    return await epub.go(to: locator, options: options)
   }
 }

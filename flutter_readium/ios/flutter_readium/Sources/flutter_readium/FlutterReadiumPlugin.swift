@@ -582,7 +582,7 @@ extension FlutterReadiumPlugin {
   }
 
   private func loadPublication (
-    fromUrlStr: String,
+    fromUrlStr: String
   ) async -> Result<Publication, ReadiumError> {
     var url: URL
     if fromUrlStr.hasPrefix("http") {

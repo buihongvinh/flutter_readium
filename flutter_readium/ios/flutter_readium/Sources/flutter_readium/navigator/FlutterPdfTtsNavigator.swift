@@ -19,6 +19,7 @@ public class FlutterPdfTtsNavigator: NSObject, FlutterTimebasedNavigator, AVSpee
 
     public let publication: Publication
     public let initialLocator: Locator?
+    public var currentLocator: Locator? { buildCurrentLocator() }
     public var listener: (any TimebasedListener)?
 
     // MARK: - TTS engine
@@ -219,8 +220,19 @@ public class FlutterPdfTtsNavigator: NSObject, FlutterTimebasedNavigator, AVSpee
         return true
     }
 
+    @MainActor
+    public func seek(toProgression progression: Double) async -> Bool {
+        guard isReady, !sentences.isEmpty else { return false }
+        synthesizer.stopSpeaking(at: .immediate)
+        let targetIndex = Int((Double(sentences.count - 1) * progression).rounded())
+        currentIndex = min(max(targetIndex, 0), sentences.count - 1)
+        if isPlaying { speakCurrentSentence() } else { emitCurrentLocator() }
+        return true
+    }
+
     @MainActor public func seek(toOffset: Double) async -> Bool { return false }
     @MainActor public func seekRelative(byOffsetSeconds: Double) async -> Bool { return false }
+    @MainActor public func decorationsUpdated() {}
 
     // MARK: - TTS preferences
 
@@ -297,7 +309,7 @@ public class FlutterPdfTtsNavigator: NSObject, FlutterTimebasedNavigator, AVSpee
 
     private func emitCurrentLocator() {
         guard let locator = buildCurrentLocator() else { return }
-        listener?.timebasedNavigator(self, reachedLocator: locator)
+        listener?.timebasedNavigator(self, reachedLocator: locator, segmentDuration: nil)
     }
 
     private func buildCurrentLocator() -> Locator? {
@@ -328,16 +340,16 @@ public class FlutterPdfTtsNavigator: NSObject, FlutterTimebasedNavigator, AVSpee
             throw FlutterPdfTtsError.noPdfLink
         }
 
-        let urlStr = pdfLink.url().absoluteString
+        let urlStr = pdfLink.url().string
         let pdfURL: URL
 
-        if urlStr.hasPrefix("file:") {
-            guard let u = URL(string: urlStr) else {
-                throw FlutterPdfTtsError.invalidURL(urlStr)
-            }
-            pdfURL = u
-        } else if urlStr.hasPrefix("http") {
-            pdfURL = try await downloadToTemp(url: URL(string: urlStr)!)
+        if let resolvedURL = URL(string: urlStr), resolvedURL.isFileURL {
+            pdfURL = resolvedURL
+        } else if let resolvedURL = URL(string: urlStr),
+                  ["http", "https"].contains(resolvedURL.scheme?.lowercased() ?? "") {
+            pdfURL = try await downloadToTemp(url: resolvedURL)
+        } else if urlStr.hasPrefix("/") {
+            pdfURL = URL(fileURLWithPath: urlStr)
         } else {
             throw FlutterPdfTtsError.invalidURL(urlStr)
         }

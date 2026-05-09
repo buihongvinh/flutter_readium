@@ -54,7 +54,7 @@ public class FlutterTTSNavigator: FlutterTimebasedNavigator, PublicationSpeechSy
       publication: publication,
       config: PublicationSpeechSynthesizer.Configuration(
         defaultLanguage: preferences.overrideLanguage,
-        voiceIdentifier: preferences.voiceIdentifier,
+        voiceIdentifier: preferences.voiceIdentifier
       ),
       engineFactory: {
         return self.engine!

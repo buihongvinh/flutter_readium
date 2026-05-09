@@ -264,7 +264,7 @@ extension Decoration {
     self.init(
       id: idString as Id,
       locator: locator,
-      style: style,
+      style: style
     )
   }
 }
@@ -431,7 +431,7 @@ extension AudioPreferences {
   public init(fromFlutterPrefs prefs: FlutterAudioPreferences) {
     self.init(
       volume: prefs.volume,
-      speed: prefs.speed,
+      speed: prefs.speed
     )
   }
 }

@@ -69,7 +69,7 @@ public class NowPlayingInfoUpdater {
     NowPlayingInfo.shared.playback = NowPlayingInfo.Playback(
       duration: info.duration,
       elapsedTime: info.time,
-      rate: speed,
+      rate: speed
     )
   }
 
@@ -77,7 +77,7 @@ public class NowPlayingInfoUpdater {
     NowPlayingInfo.shared.playback = NowPlayingInfo.Playback(
       duration: duration,
       elapsedTime: elapsedTime,
-      rate: speed,
+      rate: speed
     )
   }
 

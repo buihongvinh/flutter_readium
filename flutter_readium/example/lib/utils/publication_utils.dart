@@ -20,7 +20,9 @@ const _allowedPublicationExtensions = [
 class PublicationUtils {
   static Future<Iterable<String>> getAssetPubFiles() async {
     final assetManifest = await AssetManifest.loadFromAssetBundle(rootBundle);
-    final assets = assetManifest.listAssets().where((asset) => asset.startsWith('assets/pubs/'));
+    final assets = assetManifest.listAssets().where(
+      (asset) => asset.startsWith('assets/pubs/'),
+    );
     return assets;
   }
 
@@ -38,7 +40,9 @@ class PublicationUtils {
 
     // Loop through the filtered assets
     for (final assetPath in pubAssets) {
-      if (!_allowedPublicationExtensions.any((ext) => assetPath.endsWith(ext))) {
+      if (!_allowedPublicationExtensions.any(
+        (ext) => assetPath.endsWith(ext),
+      )) {
         debugPrint('Skip asset path: $assetPath');
         continue;
       }
@@ -51,7 +55,10 @@ class PublicationUtils {
 
       if (!exists) {
         final data = await rootBundle.load(assetPath);
-        final bytes = data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+        final bytes = data.buffer.asUint8List(
+          data.offsetInBytes,
+          data.lengthInBytes,
+        );
         await file.writeAsBytes(bytes);
         debugPrint('saved ${file.path} size=${await file.length()}');
       } else {
@@ -74,7 +81,9 @@ class PublicationUtils {
     final fileName = path.basename(file.path);
     final newPath = path.join(publicationsDirPath, fileName);
     await file.copy(newPath);
-    debugPrint('Đã copy file ${file.path} (${await file.length()} bytes) → $newPath');
+    debugPrint(
+      'Đã copy file ${file.path} (${await file.length()} bytes) → $newPath',
+    );
     return newPath;
   }
 
@@ -130,7 +139,9 @@ class PublicationUtils {
     return copyFileToReadiumPubStorage(file);
   }
 
-  static Future<void> removePublicationFromReadiumStorage(String pubPath) async {
+  static Future<void> removePublicationFromReadiumStorage(
+    String pubPath,
+  ) async {
     final publicationsDirPath = await ReadiumStorage.publicationsDirPath;
     final publicationPath = path.join(publicationsDirPath, pubPath);
     await File(publicationPath).delete();

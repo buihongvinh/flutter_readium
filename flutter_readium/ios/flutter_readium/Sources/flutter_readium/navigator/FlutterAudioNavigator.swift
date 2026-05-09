@@ -52,7 +52,7 @@ public class FlutterAudioNavigator: FlutterTimebasedNavigator, AudioNavigatorDel
       initialLocation: initialLocator,
       config: AudioNavigator.Configuration(
         preferences: AudioPreferences(fromFlutterPrefs: _preferences),
-        playbackRefreshInterval: _preferences.updateIntervalSecs,
+        playbackRefreshInterval: _preferences.updateIntervalSecs
       )
     )
     _audioNavigator?.delegate = self

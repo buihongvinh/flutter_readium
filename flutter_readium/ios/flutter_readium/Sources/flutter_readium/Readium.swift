@@ -47,7 +47,7 @@ final class Readium : DefaultHTTPClientDelegate {
         assetRetriever: assetRetriever!,
         pdfFactory: DefaultPDFDocumentFactory()
       ),
-      contentProtections: contentProtections,
+      contentProtections: contentProtections
     )
   }
 

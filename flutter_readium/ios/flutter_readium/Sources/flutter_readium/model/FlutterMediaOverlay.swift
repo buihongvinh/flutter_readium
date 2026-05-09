@@ -161,7 +161,7 @@ struct FlutterMediaOverlayItem {
       mediaType: MediaType.xhtml,
       title: tocTitle,
       locations: .init(
-        fragments: frag.map { [$0] } ?? [],
+        fragments: frag.map { [$0] } ?? []
       )
     )
     if (frag != nil) {
@@ -197,7 +197,7 @@ struct FlutterMediaOverlayItem {
       progression: audioLocator.locations.progression,
       totalProgression: audioLocator.locations.totalProgression,
       position: self.position + 1,
-      otherLocations: textLocator.locations.otherLocations,
+      otherLocations: textLocator.locations.otherLocations
     )
     return textLocator
   }
