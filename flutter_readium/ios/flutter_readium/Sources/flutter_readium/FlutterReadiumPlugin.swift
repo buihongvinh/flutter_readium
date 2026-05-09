@@ -166,9 +166,29 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
           }
 
           Task { @MainActor in
-            // Start TTS from the reader's current location
             let currentLocation = self.currentReaderView?.getCurrentLocation()
-            self.timebasedNavigator = FlutterTTSNavigator(publication: publication, preferences: ttsPrefs, initialLocator: currentLocation)
+
+            // Kiểm tra publication type: PDF dùng FlutterPdfTtsNavigator,
+            // EPUB/WebPub dùng FlutterTTSNavigator như cũ.
+            let firstItemType = publication.readingOrder.first?.mediaType?.string ?? ""
+            let isPdf = firstItemType.lowercased().contains("pdf")
+
+            if isPdf {
+              // PDF TTS: trích xuất text từ PDFKit, phát bằng AVSpeechSynthesizer
+              self.timebasedNavigator = FlutterPdfTtsNavigator(
+                publication: publication,
+                preferences: ttsPrefs,
+                initialLocator: currentLocation
+              )
+            } else {
+              // EPUB / WebPub TTS: dùng Readium PublicationSpeechSynthesizer
+              self.timebasedNavigator = FlutterTTSNavigator(
+                publication: publication,
+                preferences: ttsPrefs,
+                initialLocator: currentLocation
+              )
+            }
+
             self.timebasedNavigator?.listener = self
             Task {
               await self.timebasedNavigator?.initNavigator()
@@ -196,15 +216,17 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
       let voiceIdentifier = args[0] as! String
       // TODO: language might be supplied as args[1], ignored on iOS for now.
 
-      guard let ttsNavigator = self.timebasedNavigator as? FlutterTTSNavigator else {
-        return result(FlutterError.init(
-          code: "TTSError",
-          message: "TTS Navigator not initialized",
-          details: nil))
-      }
-
       do {
-        try ttsNavigator.ttsSetVoice(voiceIdentifier: voiceIdentifier)
+        if let ttsNavigator = self.timebasedNavigator as? FlutterTTSNavigator {
+          try ttsNavigator.ttsSetVoice(voiceIdentifier: voiceIdentifier)
+        } else if let pdfTtsNavigator = self.timebasedNavigator as? FlutterPdfTtsNavigator {
+          try pdfTtsNavigator.ttsSetVoice(voiceIdentifier: voiceIdentifier)
+        } else {
+          return result(FlutterError.init(
+            code: "TTSError",
+            message: "TTS Navigator not initialized",
+            details: nil))
+        }
         result(nil)
       } catch {
         result(FlutterError.init(
@@ -225,15 +247,18 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
       result(nil)
     case "ttsSetPreferences":
       let args = call.arguments as? Dictionary<String, Any>
-      guard let ttsNavigator = self.timebasedNavigator as? FlutterTTSNavigator else {
-        return result(FlutterError.init(
-          code: "TTSError",
-          message: "TTS Navigator not initialized",
-          details: nil))
-      }
       do {
         let ttsPrefs = try TTSPreferences(fromMap: args!)
-        ttsNavigator.ttsSetPreferences(prefs: ttsPrefs)
+        if let ttsNavigator = self.timebasedNavigator as? FlutterTTSNavigator {
+          ttsNavigator.ttsSetPreferences(prefs: ttsPrefs)
+        } else if let pdfTtsNavigator = self.timebasedNavigator as? FlutterPdfTtsNavigator {
+          pdfTtsNavigator.ttsSetPreferences(prefs: ttsPrefs)
+        } else {
+          return result(FlutterError.init(
+            code: "TTSError",
+            message: "TTS Navigator not initialized",
+            details: nil))
+        }
         result(nil)
       } catch {
         result(FlutterError.init(

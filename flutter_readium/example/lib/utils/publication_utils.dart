@@ -1,10 +1,21 @@
 import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:path/path.dart' as path;
 import 'package:flutter/services.dart';
 
 import 'readium_storage.dart';
+
+/// Các định dạng file được hỗ trợ bởi Readium plugin.
+const _allowedPublicationExtensions = [
+  '.webpub',
+  '.epub',
+  '.audiobook',
+  '.zip',
+  '.json',
+  '.pdf',
+];
 
 class PublicationUtils {
   static Future<Iterable<String>> getAssetPubFiles() async {
@@ -25,11 +36,9 @@ class PublicationUtils {
     final pubAssets = await getAssetPubFiles();
     final pubs = <String>[];
 
-    final allowedExts = ['.webpub', '.epub', '.audiobook', '.zip', '.json'];
-
     // Loop through the filtered assets
     for (final assetPath in pubAssets) {
-      if (!allowedExts.any((ext) => assetPath.endsWith(ext))) {
+      if (!_allowedPublicationExtensions.any((ext) => assetPath.endsWith(ext))) {
         debugPrint('Skip asset path: $assetPath');
         continue;
       }
@@ -53,17 +62,72 @@ class PublicationUtils {
     return pubs;
   }
 
+  /// Sao chép file vào thư mục lưu trữ của Readium và trả về đường dẫn mới.
   static Future<String> copyFileToReadiumPubStorage(File file) async {
     final exists = await file.exists();
     if (!exists) {
-      debugPrint('Could not copy file from ${file.path}, does not exist');
+      throw Exception('File không tồn tại: ${file.path}');
     }
 
     final publicationsDirPath = await ReadiumStorage.publicationsDirPath;
-    String newPath = path.join(publicationsDirPath, file.uri.path);
+    // Dùng basename để tránh lỗi khi file.uri.path bao gồm toàn bộ đường dẫn.
+    final fileName = path.basename(file.path);
+    final newPath = path.join(publicationsDirPath, fileName);
     await file.copy(newPath);
-    debugPrint('copied file ${file.path} size=${await file.length()} to=$newPath');
+    debugPrint('Đã copy file ${file.path} (${await file.length()} bytes) → $newPath');
     return newPath;
+  }
+
+  /// Mở file picker để người dùng chọn file PDF hoặc publication khác từ thiết bị.
+  /// Trả về đường dẫn file đã copy vào storage, hoặc null nếu người dùng hủy.
+  static Future<String?> pickAndImportPublicationFile() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: _allowedPublicationExtensions
+          .map((ext) => ext.replaceFirst('.', ''))
+          .toList(),
+      allowMultiple: false,
+    );
+
+    if (result == null || result.files.isEmpty) {
+      debugPrint('Người dùng đã hủy chọn file');
+      return null;
+    }
+
+    final platformFile = result.files.first;
+    if (platformFile.path == null) {
+      debugPrint('Không thể lấy đường dẫn file');
+      return null;
+    }
+
+    final file = File(platformFile.path!);
+    debugPrint('Đã chọn file: ${file.path}');
+    return copyFileToReadiumPubStorage(file);
+  }
+
+  /// Mở file picker chỉ dành riêng cho file PDF.
+  /// Trả về đường dẫn file PDF đã copy vào storage, hoặc null nếu người dùng hủy.
+  static Future<String?> pickAndImportPdfFile() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['pdf'],
+      allowMultiple: false,
+    );
+
+    if (result == null || result.files.isEmpty) {
+      debugPrint('Người dùng đã hủy chọn PDF');
+      return null;
+    }
+
+    final platformFile = result.files.first;
+    if (platformFile.path == null) {
+      debugPrint('Không thể lấy đường dẫn file PDF');
+      return null;
+    }
+
+    final file = File(platformFile.path!);
+    debugPrint('Đã chọn PDF: ${file.path}');
+    return copyFileToReadiumPubStorage(file);
   }
 
   static Future<void> removePublicationFromReadiumStorage(String pubPath) async {

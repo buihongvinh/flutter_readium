@@ -1,5 +1,4 @@
 import 'dart:convert';
-import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/foundation.dart';
@@ -133,14 +132,13 @@ class BookshelfPageState extends State<BookshelfPage> {
                     ),
                   ),
                 ),
-                // Divider(),
-                // _buildAddBookCard(context),
+                const Divider(),
+                _buildImportButtonRow(context),
               ],
             ),
     ),
   );
 
-  // ignore: unused_element
   void _toast(final String text, {final Duration duration = const Duration(milliseconds: 4000)}) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(text), duration: duration));
   }
@@ -154,25 +152,25 @@ class BookshelfPageState extends State<BookshelfPage> {
     return authorNames.isEmpty ? 'Unknown author' : authorNames;
   }
 
-  // Future<String?> _pickAndImportPubFromFile() async {
-  //   final result = await FilePicker.platform.pickFiles();
+  /// Mở file picker để người dùng chọn file PDF hoặc ebook từ thiết bị.
+  Future<String?> _pickAndImportPubFromFile() async {
+    try {
+      return await PublicationUtils.pickAndImportPublicationFile();
+    } on Exception catch (e) {
+      debugPrint('Lỗi khi import file: $e');
+      return null;
+    }
+  }
 
-  //   if (result != null) {
-  //     final platformFile = result.files.first;
-
-  //     // Convert PlatformFile to File
-  //     final file = File(platformFile.path!);
-
-  //     // Validate the file
-  //     // PublicationUtils.validateFile(file);
-  //     R2Log.d('Picked file: ${file.path}');
-
-  //     return await PublicationUtils.copyFileToReadiumPubStorage(file);
-  //   } else {
-  //     R2Log.d('User canceled the picker');
-  //     return null;
-  //   }
-  // }
+  /// Mở file picker chỉ để chọn file PDF.
+  Future<String?> _pickAndImportPdfFile() async {
+    try {
+      return await PublicationUtils.pickAndImportPdfFile();
+    } on Exception catch (e) {
+      debugPrint('Lỗi khi import PDF: $e');
+      return null;
+    }
+  }
 
   String _bookFormatFromConformsTo(Publication pub) {
     if (pub.conformsToReadiumEbook) {
@@ -242,40 +240,69 @@ class BookshelfPageState extends State<BookshelfPage> {
     ),
   );
 
-  // Widget _buildAddBookCard(final BuildContext context) => Container(
-  //       padding: const EdgeInsets.fromLTRB(8.0, 4.0, 8.0, 4.0),
-  //       child: InkWell(
-  //         onTap: () async {
-  //           try {
-  //             String? importedPubPath = await _pickAndImportPubFromFile();
-  //             if (importedPubPath == null) return;
-  //             Publication? importedPublication = await openPublicationFromUrl(importedPubPath);
-  //             if (importedPublication != null) {
-  //               setState(() {
-  //                 _testPublications.add(importedPublication);
-  //               });
-  //             }
-  //           } on Object catch (e) {
-  //             R2Log.e('error picking file: $e');
-  //             _toast('Error picking file $e');
-  //           }
-  //         },
-  //         child: Card(
-  //           color: Colors.blue[200],
-  //           child: Padding(
-  //             padding: const EdgeInsets.symmetric(horizontal: 4.0, vertical: 5.0),
-  //             child: Row(
-  //               mainAxisAlignment: MainAxisAlignment.center,
-  //               children: [
-  //                 Icon(Icons.add, size: 30, color: Colors.blue),
-  //                 Text(
-  //                   'Add Book',
-  //                   style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
-  //                 ),
-  //               ],
-  //             ),
-  //           ),
-  //         ),
-  //       ),
-  //     );
+  /// Row chứa các nút import: Import PDF và Import Ebook/Publication.
+  Widget _buildImportButtonRow(BuildContext context) => Padding(
+    padding: const EdgeInsets.fromLTRB(8.0, 4.0, 8.0, 12.0),
+    child: Row(
+      children: [
+        Expanded(child: _buildImportPdfButton()),
+        const SizedBox(width: 8),
+        Expanded(child: _buildImportPublicationButton()),
+      ],
+    ),
+  );
+
+  /// Nút import PDF từ thiết bị.
+  Widget _buildImportPdfButton() => ElevatedButton.icon(
+    icon: const Icon(Icons.picture_as_pdf, color: Colors.red),
+    label: const Text('Import PDF'),
+    style: ElevatedButton.styleFrom(
+      backgroundColor: Colors.red[50],
+      foregroundColor: Colors.red[800],
+    ),
+    onPressed: () async {
+      try {
+        final importedPath = await _pickAndImportPdfFile();
+        if (importedPath == null) return;
+        final publication = await loadPublicationFromUrl(importedPath);
+        if (publication != null && mounted) {
+          setState(() {
+            _testPublications.add(publication);
+            _testPublicationURLs.add(importedPath);
+          });
+          _toast('Đã import PDF: ${publication.metadata.title}');
+        }
+      } on Object catch (e) {
+        debugPrint('Lỗi import PDF: $e');
+        _toast('Lỗi khi import PDF: $e');
+      }
+    },
+  );
+
+  /// Nút import bất kỳ publication nào được hỗ trợ (EPUB, audiobook, v.v.).
+  Widget _buildImportPublicationButton() => ElevatedButton.icon(
+    icon: const Icon(Icons.add, color: Colors.blue),
+    label: const Text('Import Ebook'),
+    style: ElevatedButton.styleFrom(
+      backgroundColor: Colors.blue[50],
+      foregroundColor: Colors.blue[800],
+    ),
+    onPressed: () async {
+      try {
+        final importedPath = await _pickAndImportPubFromFile();
+        if (importedPath == null) return;
+        final publication = await loadPublicationFromUrl(importedPath);
+        if (publication != null && mounted) {
+          setState(() {
+            _testPublications.add(publication);
+            _testPublicationURLs.add(importedPath);
+          });
+          _toast('Đã import: ${publication.metadata.title}');
+        }
+      } on Object catch (e) {
+        debugPrint('Lỗi import publication: $e');
+        _toast('Lỗi khi import: $e');
+      }
+    },
+  );
 }

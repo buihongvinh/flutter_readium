@@ -9,6 +9,8 @@ import android.view.ViewGroup
 import androidx.fragment.app.FragmentManager
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryOwner
+import dk.nota.flutter_readium.events.ErrorEventChannel
+import dk.nota.flutter_readium.events.ReadiumErrorEvent
 import dk.nota.flutter_readium.events.ReadiumReaderStatus
 import dk.nota.flutter_readium.events.ReadiumReaderStatusEventChannel
 import dk.nota.flutter_readium.events.TextLocatorEventChannel
@@ -19,6 +21,7 @@ import dk.nota.flutter_readium.navigators.EpubNavigator
 import dk.nota.flutter_readium.navigators.SyncAudiobookNavigator
 import dk.nota.flutter_readium.navigators.TTSNavigator
 import dk.nota.flutter_readium.navigators.TimebasedNavigator
+import dk.nota.flutter_readium.pdf.AndroidPdfDocumentFactory
 import io.flutter.plugin.common.BinaryMessenger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -73,6 +76,7 @@ private const val TAG = "ReadiumReader"
 private const val stateKey = "dk.nota.flutter_readium.ReadiumReaderState"
 
 private const val currentPublicationUrlKey = "currentPublicationUrl"
+private const val cachedPdfFilePathKey = "cachedPdfFilePath"
 private const val ttsEnabledKey = "ttsEnabled"
 private const val audioEnabledKey = "audioEnabled"
 private const val syncAudioEnabledKey = "syncAudioEnabled"
@@ -100,6 +104,11 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     private var textLocatorEventChannel: TextLocatorEventChannel? = null
 
     private var readiumReaderStatusEventChannel: ReadiumReaderStatusEventChannel? = null
+
+    private var errorEventChannel: ErrorEventChannel? = null
+
+    /** Navigator TTS dành riêng cho PDF (dùng PDFBox + Android TextToSpeech). */
+    private var pdfTtsNavigator: dk.nota.flutter_readium.navigators.PdfTtsNavigator? = null
 
     private var readerViewRef: WeakReference<ReadiumReaderWidget>? = null
 
@@ -187,6 +196,7 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
 
     /**
      * The PublicationFactory is used to open publications.
+     * Sử dụng [AndroidPdfDocumentFactory] để hỗ trợ file PDF mà không cần thư viện thương mại.
      */
     private val publicationOpener: PublicationOpener
         get() {
@@ -196,8 +206,9 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
                         context,
                         assetRetriever = assetRetriever,
                         httpClient = httpClient,
-                        // Only required if you want to support PDF files using the PDFium adapter.
-                        pdfFactory = null, //PdfiumDocumentFactory(context)
+                        // Sử dụng AndroidPdfDocumentFactory (dùng android.graphics.pdf.PdfRenderer tích hợp sẵn).
+                        // Thay thế bằng PsPDFKitDocumentFactory nếu cần tính năng PDF nâng cao (yêu cầu license).
+                        pdfFactory = AndroidPdfDocumentFactory(context),
                     ),
                 )
             }
@@ -214,6 +225,7 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
 
         textLocatorEventChannel = TextLocatorEventChannel(messenger)
         readiumReaderStatusEventChannel = ReadiumReaderStatusEventChannel(messenger)
+        errorEventChannel = ErrorEventChannel(messenger)
 
         // store weak ref only
         (activity as? SavedStateRegistryOwner)?.savedStateRegistry?.let {
@@ -368,7 +380,10 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
         textLocatorEventChannel = null
 
         readiumReaderStatusEventChannel?.dispose()
-        textLocatorEventChannel = null
+        readiumReaderStatusEventChannel = null
+
+        errorEventChannel?.dispose()
+        errorEventChannel = null
 
         jobs.forEach { it.cancel() }
         jobs.clear()
@@ -396,6 +411,17 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
         get() = state[currentPublicationUrlKey] as String?
         set(value) {
             state[currentPublicationUrlKey] = value
+        }
+
+    /**
+     * Đường dẫn tuyệt đối đến file PDF hiện tại, hoặc null nếu không phải PDF.
+     * Được cache khi [openPublication] thành công để tránh re-parse URL (vốn fragile
+     * khi tên file có dấu cách hoặc ký tự đặc biệt).
+     */
+    private var cachedPdfFilePath: String?
+        get() = state[cachedPdfFilePathKey] as String?
+        set(value) {
+            state[cachedPdfFilePathKey] = value
         }
 
     /**
@@ -526,6 +552,28 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
         _currentPublication = pub
         currentPublicationUrl = pubUrl.toString()
 
+        // Cache đường dẫn file PDF ngay tại đây để tránh re-parse URL sau này.
+        // android.net.Uri.parse() decode percent-encoding (%20 → space) đúng cách
+        // và không throw exception khi URL có ký tự đặc biệt.
+        cachedPdfFilePath = if (isPdfPublication(pub)) {
+            val urlStr = pubUrl.toString()
+            val path = when {
+                urlStr.startsWith("file:") ->
+                    try {
+                        android.net.Uri.parse(urlStr).path
+                    } catch (e: Exception) {
+                        Log.e(TAG, "openPublication: lỗi parse file URL '$urlStr': $e")
+                        null
+                    }
+                urlStr.startsWith("/") -> urlStr
+                else -> null
+            }
+            Log.d(TAG, "openPublication: cached PDF path = '$path' (from URL: $urlStr)")
+            path
+        } else {
+            null
+        }
+
         return Try.success(pub)
     }
 
@@ -560,12 +608,18 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
 
     /**
      * Helper function for resolving a URL and make sure a file path is turned into a URL.
+     *
+     * Lưu ý: Sử dụng [java.io.File.toURI] thay vì ghép chuỗi "file://" để đảm bảo
+     * tên file có dấu cách hoặc ký tự đặc biệt được percent-encode đúng cách
+     * (ví dụ: "Tham Do Tiem Thuc.pdf" → "file:///…/Tham%20Do%20Tiem%20Thuc.pdf").
+     * Nếu không encode, [AbsoluteUrl] sẽ trả về null và gây lỗi notFound.
      */
     private fun resolvePubUrl(urlStr: String): Try<AbsoluteUrl, PublicationError> {
         var pubUrlStr = urlStr
         // If URL is neither http nor file, assume it is a local file reference.
         if (!pubUrlStr.startsWith("http") && !pubUrlStr.startsWith("file")) {
-            pubUrlStr = "file://$pubUrlStr"
+            // File.toURI() percent-encodes spaces và ký tự đặc biệt trong đường dẫn
+            pubUrlStr = java.io.File(pubUrlStr).toURI().toString()
         }
         // Create AbsoluteUrl, return PublicationError.InvalidPublicationUrl if null
         val pubUrl = AbsoluteUrl(pubUrlStr) ?: return failure(
@@ -579,6 +633,9 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
         mainScope.async {
             _currentPublication?.close()
             _currentPublication = null
+
+            pdfTtsNavigator?.dispose()
+            pdfTtsNavigator = null
 
             ttsNavigator?.dispose()
             ttsNavigator = null
@@ -681,17 +738,38 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     }
 
     suspend fun ttsEnable(ttsPrefs: FlutterTtsPreferences) {
-        currentPublication?.let {
-            // TODO: Get initial locator
-            ttsNavigator = TTSNavigator(it, this@ReadiumReader, null, ttsPrefs).apply {
+        val pub = currentPublication ?: throw Exception("Publication not opened cannot enable tts")
+
+        if (isCurrentPublicationPdf()) {
+            // ── PDF: trích xuất text bằng PDFBox, phát bằng Android TextToSpeech ──
+            val filePath = cachedPdfFilePath
+                ?: throw Exception("PDF file path not cached — openPublication() phải chạy trước")
+
+            pdfTtsNavigator?.dispose()
+            pdfTtsNavigator = dk.nota.flutter_readium.navigators.PdfTtsNavigator(
+                context           = application,
+                pdfFilePath       = filePath,
+                publication       = pub,
+                preferences       = ttsPrefs,
+                timebaseListener  = this@ReadiumReader,
+            ).also { it.initialize() }
+
+        } else {
+            // ── EPUB/WebPub: Readium TtsNavigator như cũ ──────────────────────────
+            ttsNavigator?.dispose()
+            ttsNavigator = TTSNavigator(pub, this@ReadiumReader, null, ttsPrefs).apply {
                 initNavigator()
             }
-        } ?: throw Exception("Publication not opened cannot enable tts")
+        }
     }
 
     suspend fun ttsSetPreferences(ttsPrefs: FlutterTtsPreferences) {
-        ttsNavigator?.updatePreferences(ttsPrefs)
-            ?: throw Exception("TTS is not enabled, can't set preferences")
+        if (pdfTtsNavigator != null) {
+            pdfTtsNavigator?.updatePreferences(ttsPrefs)
+        } else {
+            ttsNavigator?.updatePreferences(ttsPrefs)
+                ?: throw Exception("TTS is not enabled, can't set preferences")
+        }
     }
 
     suspend fun setDecorationStyle(style: FlutterDecorationPreferences) {
@@ -734,7 +812,11 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
             return
         }
 
-        ttsNavigator?.setPreferredVoice(voiceId, language)
+        if (pdfTtsNavigator != null) {
+            pdfTtsNavigator?.setPreferredVoice(voiceId, language)
+        } else {
+            ttsNavigator?.setPreferredVoice(voiceId, language)
+        }
     }
 
     suspend fun play(locator: Locator?) {
@@ -744,42 +826,47 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
             fromLocator = currentReaderWidget?.getFirstVisibleLocator()
         }
 
+        pdfTtsNavigator?.play(fromLocator)
         audiobookNavigator?.play(fromLocator)
         syncAudiobookNavigator?.play(fromLocator)
         ttsNavigator?.play(fromLocator)
     }
 
     suspend fun pause() {
+        pdfTtsNavigator?.pause()
         audiobookNavigator?.pause()
         syncAudiobookNavigator?.pause()
         ttsNavigator?.pause()
     }
 
     suspend fun resume() {
+        pdfTtsNavigator?.resume()
         audiobookNavigator?.resume()
         syncAudiobookNavigator?.resume()
         ttsNavigator?.resume()
     }
 
     suspend fun stop() {
+        pdfTtsNavigator?.apply {
+            stop()
+            dispose()
+            pdfTtsNavigator = null
+        }
+
         audiobookNavigator?.apply {
             pause()
             dispose()
-
             audiobookNavigator = null
         }
 
         syncAudiobookNavigator?.apply {
-            // pause()
             dispose()
-
-            audiobookNavigator = null
+            syncAudiobookNavigator = null
         }
 
         ttsNavigator?.apply {
             pause()
             dispose()
-
             ttsNavigator = null
         }
     }
@@ -788,6 +875,7 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
      * Skip backwards.
      */
     suspend fun previous() {
+        pdfTtsNavigator?.goBack()
         audiobookNavigator?.goBack()
         syncAudiobookNavigator?.goBack()
         ttsNavigator?.goBack()
@@ -797,6 +885,7 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
      * Skip forwards.
      */
     suspend fun next() {
+        pdfTtsNavigator?.goForward()
         audiobookNavigator?.goForward()
         syncAudiobookNavigator?.goForward()
         ttsNavigator?.goForward()
@@ -947,5 +1036,54 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
      */
     fun emitTextLocatorUpdate(locator: Locator) {
         textLocatorEventChannel?.sendEvent(locator)
+    }
+
+    /**
+     * Emit an error event to the flutter layer via the error event channel.
+     */
+    fun emitError(message: String, code: String? = null, data: String? = null) {
+        errorEventChannel?.sendEvent(ReadiumErrorEvent(message = message, code = code, data = data))
+    }
+
+    // ─── PDF Support ─────────────────────────────────────────────────────────
+
+    /**
+     * Kiểm tra xem publication hiện tại có phải là PDF hay không.
+     * PDF publications thường có readingOrder đầu tiên với mediaType chứa "pdf".
+     */
+    fun isCurrentPublicationPdf(): Boolean {
+        val pub = _currentPublication ?: return false
+        return isPdfPublication(pub)
+    }
+
+    /**
+     * Helper: Kiểm tra [Publication] có phải là PDF không.
+     */
+    fun isPdfPublication(publication: org.readium.r2.shared.publication.Publication): Boolean {
+        // Kiểm tra qua readingOrder media type
+        val firstLinkType = publication.readingOrder.firstOrNull()?.mediaType?.toString() ?: ""
+        if (firstLinkType.contains("pdf", ignoreCase = true)) return true
+
+        // Kiểm tra qua manifest links
+        val selfLink = publication.links.firstOrNull { it.rels.contains("self") }
+        val selfType = selfLink?.mediaType?.toString() ?: ""
+        if (selfType.contains("pdf", ignoreCase = true)) return true
+
+        return false
+    }
+
+    /**
+     * Lấy đường dẫn file PDF từ publication hiện tại (nếu là PDF).
+     *
+     * Trả về đường dẫn tuyệt đối đến file PDF trên thiết bị,
+     * hoặc null nếu publication không phải PDF hoặc không phải local file.
+     *
+     * Path được cache trong [currentPdfFilePath] từ lúc [openPublication] thành công
+     * để tránh re-parse URL (vấn đề với tên file có dấu cách).
+     */
+    fun getCurrentPdfFilePath(): String? {
+        val path = cachedPdfFilePath
+        Log.d(TAG, "getCurrentPdfFilePath: '$path' (currentPublicationUrl='$currentPublicationUrl')")
+        return path
     }
 }
