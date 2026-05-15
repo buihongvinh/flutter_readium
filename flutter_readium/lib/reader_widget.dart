@@ -188,7 +188,17 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget>
   @override
   Future<Locator?> getCurrentLocator() async {
     R2Log.d('GetCurrentLocator()');
-    return _channel?.getCurrentLocator();
+    final channel = _channel;
+    if (channel == null || wasDestroyed) {
+      return _currentLocator;
+    }
+
+    try {
+      return await channel.getCurrentLocator() ?? _currentLocator;
+    } on Object catch (error) {
+      R2Log.w('getCurrentLocator failed, returning cached locator: $error');
+      return _currentLocator;
+    }
   }
 
   @override

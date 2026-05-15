@@ -52,6 +52,9 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
 
   private var isVerticalScroll = false
   private var hasSentReady = false
+  private var initialLocatorForRestore: Locator?
+  private var cachedLocator: Locator?
+  private var hasAcceptedEpubLocator = false
 
   var publicationIdentifier: String?
 
@@ -90,6 +93,8 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
     // TODO: Our custom fragments (particularly page=x) messes up the in-chapter location.
     // only allow whitelist from https://readium.org/architecture/models/locators/best-practices/format.html
     locator?.locations.fragments.removeAll(where: { !allowedInitialFragments.contains(String($0.split(separator: "=").first ?? "none")) })
+    initialLocatorForRestore = locator
+    cachedLocator = locator
 
     channel = ReadiumReaderChannel(
       name: "\(readiumReaderViewType):\(viewId)", binaryMessenger: registrar.messenger())
@@ -432,6 +437,8 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
   private func emitPdfTextPageChanged(pageIndex: Int) {
     guard let locator = buildPdfTextLocator(pageIndex: pageIndex) else { return }
 
+    cacheLocator(locator)
+
     if !hasSentReady {
       emitReaderStatusChanged(status: ReadiumReaderStatusReady)
       hasSentReady = true
@@ -528,6 +535,92 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
     return firstItemType.lowercased().contains("pdf")
   }
 
+  private func cacheLocator(_ locator: Locator) {
+    cachedLocator = locator
+  }
+
+  private func isMeaningfullyPastStart(_ locator: Locator?) -> Bool {
+    guard let locator = locator else { return false }
+    let locations = locator.locations
+
+    if (locations.progression ?? 0.0) > 0.0001 {
+      return true
+    }
+    if (locations.totalProgression ?? 0.0) > 0.0001 {
+      return true
+    }
+    if (locations.position ?? 1) > 1 {
+      return true
+    }
+
+    return !locations.fragments.isEmpty
+  }
+
+  private func isAtPublicationStart(_ locator: Locator) -> Bool {
+    let locations = locator.locations
+    return (locations.progression ?? 0.0) <= 0.0001
+      && (locations.totalProgression ?? 0.0) <= 0.0001
+      && (locations.position ?? 1) <= 1
+      && locations.fragments.isEmpty
+  }
+
+  private func sameRestoreTarget(_ locator: Locator, _ restoreLocator: Locator) -> Bool {
+    guard locator.href == restoreLocator.href else { return false }
+
+    if let position = locator.locations.position,
+       let restorePosition = restoreLocator.locations.position,
+       position == restorePosition {
+      return true
+    }
+
+    if let progression = locator.locations.progression,
+       let restoreProgression = restoreLocator.locations.progression,
+       abs(progression - restoreProgression) <= 0.001 {
+      return true
+    }
+
+    if let totalProgression = locator.locations.totalProgression,
+       let restoreTotalProgression = restoreLocator.locations.totalProgression,
+       abs(totalProgression - restoreTotalProgression) <= 0.001 {
+      return true
+    }
+
+    let locatorFragments = Set(locator.locations.fragments)
+    let restoreFragments = Set(restoreLocator.locations.fragments)
+    return !locatorFragments.isEmpty && !locatorFragments.isDisjoint(with: restoreFragments)
+  }
+
+  private func shouldIgnoreStartupLocator(_ locator: Locator) -> Bool {
+    guard !hasAcceptedEpubLocator,
+          let restoreLocator = initialLocatorForRestore else {
+      return false
+    }
+
+    // Chỉ áp dụng bộ lọc khi restore target nằm xa đầu publication,
+    // hoặc khi chapter hiện tại khác chapter cần restore.
+    let restoreLooksPastStart = isMeaningfullyPastStart(restoreLocator) || locator.href != restoreLocator.href
+    guard restoreLooksPastStart else { return false }
+
+    // Nếu locator trùng với restore target → không phải noise.
+    guard !sameRestoreTarget(locator, restoreLocator) else { return false }
+
+    // Trường hợp 1: Locator ở đầu toàn bộ publication (chapter 1, totalProgression≈0).
+    // Navigator render chapter đầu trước khi nhảy đến đúng chapter.
+    if isAtPublicationStart(locator) { return true }
+
+    // Trường hợp 2 (phổ biến trên iOS): Locator ở đúng chapter cần restore nhưng
+    // progression≈0.0 — EPUBNavigatorViewController đã load đúng chapter nhưng CHƯA
+    // scroll đến vị trí saved (scrollToLocations() chưa hoàn tất).
+    // Readium sẽ bắn locationDidChange lần thứ 2 sau khi scroll xong (~300-500ms).
+    // Nếu không lọc, event sai này sẽ được cache và emit lên Flutter stream.
+    if locator.href == restoreLocator.href,
+       (locator.locations.progression ?? 0.0) <= 0.0001 {
+      return true
+    }
+
+    return false
+  }
+
   @objc public func onCustomEditingAction() {
     print(TAG, "EditingAction::NOTA")
     // NOTE: This method will not actually be hit. It will try to find an "onCustomEditingAction" function in the Responder chain!
@@ -577,6 +670,18 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
   // override NavigatorDelegate::navigator:locationDidChange
   public func navigator(_ navigator: Navigator, locationDidChange locator: Locator) {
     print(TAG, "onPageChanged: \(locator)")
+    if shouldIgnoreStartupLocator(locator) {
+      print(TAG, "Ignoring startup locator noise while restoring previous EPUB location: \(locator)")
+      if (!hasSentReady) {
+        emitReaderStatusChanged(status: ReadiumReaderStatusReady)
+        hasSentReady = true
+      }
+      return
+    }
+
+    hasAcceptedEpubLocator = true
+    cacheLocator(locator)
+
     if (!hasSentReady) {
       emitReaderStatusChanged(status: ReadiumReaderStatusReady)
       hasSentReady = true
@@ -606,7 +711,8 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
   }
 
   func getCurrentLocation() -> Locator? {
-    return epubNavigatorViewController?.currentLocation
+    return cachedLocator
+      ?? epubNavigatorViewController?.currentLocation
       ?? buildPdfTextLocator(pageIndex: pdfTextCurrentPageIndex)
   }
 
@@ -651,14 +757,12 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
     print(TAG, "emitOnPageChanged:locator=\(String(describing: locator))")
 
     Task.detached(priority: .high) { [isVerticalScroll] in
-      guard let locatorWithFragments = await self.getLocatorFragments(json, isVerticalScroll) else {
-        print(TAG, "emitOnPageChanged failed!")
-        return
-      }
+      let locatorToEmit = await self.getLocatorFragments(json, isVerticalScroll) ?? locator
       await MainActor.run() {
-        self.channel.onPageChanged(locator: locatorWithFragments)
+        self.cacheLocator(locatorToEmit)
+        self.channel.onPageChanged(locator: locatorToEmit)
         FlutterReadiumPlugin.instance?.textLocatorStreamHandler?
-          .sendEvent(locatorWithFragments.jsonString)
+          .sendEvent(locatorToEmit.jsonString)
       }
     }
   }
@@ -675,8 +779,16 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
   internal func getLocatorFragments(_ locatorJson: String, _ isVerticalScroll: Bool) async -> Locator? {
     switch await self.evaluateJavascript("window.epubPage.getLocatorFragments(\(locatorJson), \(isVerticalScroll));") {
       case .success(let jresult):
-        let locatorWithFragments = try! Locator(json: jresult as? Dictionary<String, Any?>, warnings: readiumBugLogger)!
-        return locatorWithFragments
+        do {
+          guard let json = jresult as? Dictionary<String, Any?> else {
+            print(TAG, "getLocatorFragments failed: invalid JS result \(jresult)")
+            return nil
+          }
+          return try Locator(json: json, warnings: readiumBugLogger)
+        } catch (let err) {
+          print(TAG, "getLocatorFragments failed to parse locator: \(err)")
+          return nil
+        }
       case .failure(let err):
         print(TAG, "getLocatorFragments failed! \(err)")
         return nil
@@ -846,23 +958,11 @@ public class ReadiumReaderView: NSObject, FlutterPlatformView, EPUBNavigatorDele
     case "getCurrentLocator":
       let args = call.arguments as? String ?? "null"
       print(TAG, "onMethodCall[currentLocator] args = \(args)")
-      Task.detached(priority: .high) { [isVerticalScroll] in
-        if self.pdfTextScrollView != nil {
-          let json = await MainActor.run {
-            self.buildPdfTextLocator(pageIndex: self.pdfTextCurrentPageIndex)?.jsonString
-          }
-          await MainActor.run() { result(json) }
-          return
-        }
-        // EPUB: dùng JS để lấy locator với fragments
-        let json = await self.epubNavigatorViewController?.currentLocation?.jsonString ?? nil
-        if (json == nil) {
-          await MainActor.run() { return result(nil) }
-          return
-        }
-        let data = await self.getLocatorFragments(json!, isVerticalScroll)
-        await MainActor.run() { return result(data?.jsonString) }
+      if pdfTextScrollView != nil {
+        result(buildPdfTextLocator(pageIndex: pdfTextCurrentPageIndex)?.jsonString)
+        return
       }
+      result((cachedLocator ?? epubNavigatorViewController?.currentLocation)?.jsonString)
       break
     case "isLocatorVisible":
       let args = call.arguments as! String

@@ -30,6 +30,7 @@ import org.readium.r2.navigator.epub.EpubPreferences
 import org.readium.r2.shared.ExperimentalReadiumApi
 import org.readium.r2.shared.publication.Locator
 import org.readium.r2.shared.util.AbsoluteUrl
+import kotlin.math.abs
 
 private const val TAG = "ReadiumReaderView"
 internal const val viewTypeChannelName = "dk.nota.flutter_readium/ReadiumReaderWidget"
@@ -51,6 +52,9 @@ class ReadiumReaderWidget(
      * Make sure we only sent ready status once.
      */
     var hasSentReady = false
+    private var initialLocatorForRestore: Locator? = null
+    private var cachedLocator: Locator? = null
+    private var hasAcceptedTextLocator = false
 
     private val layout: ViewGroup
 
@@ -105,6 +109,8 @@ class ReadiumReaderWidget(
         val allowScreenReaderNavigation = creationParams["allowScreenReaderNavigation"] as Boolean?
         var initialLocator =
             if (locatorString == null) null else Locator.fromJSON(jsonDecode(locatorString) as JSONObject)
+        initialLocatorForRestore = initialLocator
+        cachedLocator = initialLocator
         val initialPreferences =
             if (initPrefsMap == null) EpubPreferences() else epubPreferencesFromMap(
                 initPrefsMap,
@@ -192,6 +198,14 @@ class ReadiumReaderWidget(
 
                 ReadiumReader.emitReaderStatusUpdate(ReadiumReaderStatus.Ready)
             }
+
+            if (shouldIgnoreStartupLocator(locator)) {
+                Log.d(TAG, "::onPageChanged ignored startup locator noise while restoring: $locator")
+                return@launch
+            }
+
+            hasAcceptedTextLocator = true
+            cachedLocator = locator
             emitOnPageChanged(locator)
         }
     }
@@ -235,14 +249,14 @@ class ReadiumReaderWidget(
 
     private suspend fun emitOnPageChanged(locator: Locator) {
         try {
-            val locatorWithFragments = ReadiumReader.epubGetLocatorFragments(locator)
-            if (locatorWithFragments == null) {
-                Log.e(TAG, "emitOnPageChanged: window.epubPage.getVisibleRange failed!")
-                return
+            val locatorToEmit = ReadiumReader.epubGetLocatorFragments(locator) ?: locator
+            if (locatorToEmit == locator) {
+                Log.w(TAG, "emitOnPageChanged: using raw locator because getLocatorFragments failed")
             }
 
-            channel.onPageChanged(locatorWithFragments)
-            ReadiumReader.emitTextLocatorUpdate(locatorWithFragments)
+            cachedLocator = locatorToEmit
+            channel.onPageChanged(locatorToEmit)
+            ReadiumReader.emitTextLocatorUpdate(locatorToEmit)
         } catch (e: Exception) {
             Log.e(TAG, "emitOnPageChanged: window.epubPage.getVisibleRange failed! $e")
         }
@@ -406,7 +420,7 @@ class ReadiumReaderWidget(
                         )
                         return@launch
                     }
-                    result.success(ReadiumReader.epubCurrentLocator?.let { jsonEncode(it.toJSON()) })
+                    result.success((cachedLocator ?: ReadiumReader.epubCurrentLocator)?.let { jsonEncode(it.toJSON()) })
                 }
 
                 else -> {
@@ -543,6 +557,7 @@ class ReadiumReaderWidget(
         Log.d(TAG, "onPdfPageChanged: page ${pageIndex + 1}/$totalPages")
         val locator = createPdfLocator(pageIndex, totalPages, pdfFragment?.getTextMetrics(pageIndex))
         if (locator != null) {
+            cachedLocator = locator
             channel.onPageChanged(locator)
             ReadiumReader.emitTextLocatorUpdate(locator)
         } else {
@@ -587,6 +602,70 @@ class ReadiumReaderWidget(
             })
         }
         return Locator.fromJSON(locatorJson)
+    }
+
+    private fun isMeaningfullyPastStart(locator: Locator?): Boolean {
+        val locations = locator?.locations ?: return false
+
+        if ((locations.progression ?: 0.0) > 0.0001) {
+            return true
+        }
+        if ((locations.totalProgression ?: 0.0) > 0.0001) {
+            return true
+        }
+        if ((locations.position ?: 1) > 1) {
+            return true
+        }
+
+        return locations.fragments.isNotEmpty()
+    }
+
+    private fun isAtPublicationStart(locator: Locator): Boolean {
+        val locations = locator.locations
+        return (locations.progression ?: 0.0) <= 0.0001 &&
+            (locations.totalProgression ?: 0.0) <= 0.0001 &&
+            (locations.position ?: 1) <= 1 &&
+            locations.fragments.isEmpty()
+    }
+
+    private fun sameRestoreTarget(locator: Locator, restoreLocator: Locator): Boolean {
+        if (locator.href != restoreLocator.href) {
+            return false
+        }
+
+        val position = locator.locations.position
+        val restorePosition = restoreLocator.locations.position
+        if (position != null && restorePosition != null && position == restorePosition) {
+            return true
+        }
+
+        val progression = locator.locations.progression
+        val restoreProgression = restoreLocator.locations.progression
+        if (progression != null && restoreProgression != null && abs(progression - restoreProgression) <= 0.001) {
+            return true
+        }
+
+        val totalProgression = locator.locations.totalProgression
+        val restoreTotalProgression = restoreLocator.locations.totalProgression
+        if (
+            totalProgression != null &&
+            restoreTotalProgression != null &&
+            abs(totalProgression - restoreTotalProgression) <= 0.001
+        ) {
+            return true
+        }
+
+        return locator.locations.fragments.intersect(restoreLocator.locations.fragments.toSet()).isNotEmpty()
+    }
+
+    private fun shouldIgnoreStartupLocator(locator: Locator): Boolean {
+        val restoreLocator = initialLocatorForRestore ?: return false
+        val restoreLooksPastStart = isMeaningfullyPastStart(restoreLocator) || locator.href != restoreLocator.href
+        if (hasAcceptedTextLocator || !restoreLooksPastStart) {
+            return false
+        }
+
+        return isAtPublicationStart(locator) && !sameRestoreTarget(locator, restoreLocator)
     }
 
     companion object {
