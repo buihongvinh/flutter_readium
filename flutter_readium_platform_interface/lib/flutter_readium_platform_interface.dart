@@ -39,6 +39,8 @@ abstract class FlutterReadiumPlatform extends PlatformInterface {
   Future<void> setCustomHeaders(Map<String, String> headers) =>
       throw UnimplementedError('setCustomHeaders(headers) has not been implemented.');
 
+  Future<void> setLogLevel(LogLevel level) => throw UnimplementedError('setLogLevel() has not been implemented.');
+
   void setDefaultPreferences(EPUBPreferences preferences) {
     defaultPreferences = preferences;
   }
@@ -58,20 +60,14 @@ abstract class FlutterReadiumPlatform extends PlatformInterface {
   Future<void> closePublication() => throw UnimplementedError('closePublication() has not been implemented.');
 
   /// Navigate left/backwards visually in the current publication renderer.
-  Future<void> goLeft() => throw UnimplementedError('goLeft() has not been implemented.');
+  Future<void> goBackward() => throw UnimplementedError('goBackward() has not been implemented.');
 
   /// Navigate right/forwards visually in the current publication renderer.
-  Future<void> goRight() => throw UnimplementedError('goRight() has not been implemented.');
-
-  /// Skip to next chapter in the current publication.
-  Future<void> skipToNext() => throw UnimplementedError('skipToNext() has not been implemented.');
-
-  /// Skip to previous chapter in the current publication.
-  Future<void> skipToPrevious() => throw UnimplementedError('skipToPrevious() has not been implemented.');
+  Future<void> goForward() => throw UnimplementedError('goForward() has not been implemented.');
 
   /// Sets the default EPUB rendering preferences and updates preferences for the ReaderWidgetView.
   Future<void> setEPUBPreferences(EPUBPreferences preferences) =>
-      throw UnimplementedError('applyDecorations() has not been implemented');
+      throw UnimplementedError('setEPUBPreferences() has not been implemented');
 
   /// Apply reader decorations (highlights, bookmarks, etc.) to the current ReaderWidgetView.
   /// The `id` parameter is used to identify the decoration set.
@@ -81,6 +77,10 @@ abstract class FlutterReadiumPlatform extends PlatformInterface {
 
   /// Go directly to the given [Locator] in the publication, whether visual or audio.
   Future<bool> goToLocator(Locator locator) => throw UnimplementedError('goToLocator() has not been implemented.');
+
+  /// Go to a specific progression in the current resource of the publication, where 0.0 is the start and 1.0 is the end.
+  Future<bool> goToProgression(double progression) =>
+      throw UnimplementedError('goToProgression() has not been implemented.');
 
   // COMMON PLAYBACK API - BEGIN
   /// Play the publication from the given locator, or resume if null.
@@ -137,6 +137,10 @@ abstract class FlutterReadiumPlatform extends PlatformInterface {
   /// This is an alternative to next/previous which seeks by a fixed interval.
   Future<void> audioSeekBy(Duration offset) => throw UnimplementedError('seekInAudio() has not been implemented');
   // AUDIOBOOK API - END
+
+  Future<List<TextSearchResult>> searchInPublication(final String searchKey) {
+    throw UnimplementedError('searchInPublication() has not been implemented');
+  }
 
   // State stream for reader status changes
   Stream<ReadiumReaderStatus> get onReaderStatusChanged {

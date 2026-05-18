@@ -2,6 +2,7 @@ package dk.nota.flutter_readium.navigators
 
 import android.util.Log
 import dk.nota.flutter_readium.PublicationError
+import dk.nota.flutter_readium.findReadingOrderLink
 import org.readium.navigator.media.common.MediaNavigator
 import org.readium.r2.shared.ExperimentalReadiumApi
 import org.readium.r2.shared.publication.Link
@@ -17,37 +18,40 @@ private const val TAG = "TimebasedNavigator"
 @OptIn(ExperimentalReadiumApi::class)
 abstract class TimebasedNavigator<P : MediaNavigator.Playback>(
     publication: Publication,
-
     /**
      * Listener for time-based navigator events.
      */
     protected val timebaseListener: TimebasedListener,
-    initialLocator: Locator?
+    initialLocator: Locator?,
 ) : BaseNavigator(publication, initialLocator) {
+    var isPlaying = false
 
     /**
      * Listener interface for time-based navigator events.
      */
     interface TimebasedListener {
         /**
-         * Called when the playback state changes.
+         * Called when the playback [timebasedState] changes.
          */
         fun onTimebasedPlaybackStateChanged(timebasedState: TimebasedState)
 
         /**
-         * Called when the time-based buffer changes.
+         * Called when the time-based [buffer] changes.
          */
         fun onTimebasedBufferChanged(buffer: Duration?)
 
         /**
-         * Called when there is a playback error.
+         * Called when there is a playback [error].
          */
         fun onTimebasedPlaybackFailure(error: PublicationError)
 
         /**
-         * Called when the current locator changes.
+         * Called when the current [locator] changes and provides [currentReadingOrderLink].
          */
-        fun onTimebasedCurrentLocatorChanges(locator: Locator, currentReadingOrderLink: Link?)
+        fun onTimebasedCurrentLocatorChanges(
+            locator: Locator,
+            currentReadingOrderLink: Link?,
+        )
 
         /**
          * Called when there is a time-based location change, this is used to highlight text while reading.
@@ -57,6 +61,8 @@ abstract class TimebasedNavigator<P : MediaNavigator.Playback>(
 
     // Possible states for a time-based navigator.
     enum class TimebasedState {
+        None,
+
         Playing,
 
         Paused,
@@ -75,7 +81,8 @@ abstract class TimebasedNavigator<P : MediaNavigator.Playback>(
         var timebasedState: TimebasedState
         when (pb.state) {
             is MediaNavigator.State.Ready -> {
-                timebasedState = if (pb.playWhenReady) TimebasedState.Playing else TimebasedState.Paused
+                timebasedState =
+                    if (pb.playWhenReady) TimebasedState.Playing else TimebasedState.Paused
             }
 
             is MediaNavigator.State.Buffering -> {
@@ -93,33 +100,41 @@ abstract class TimebasedNavigator<P : MediaNavigator.Playback>(
 
         Log.d(
             TAG,
-            ": onPlaybackStateChanged: state=${pb.state} playWhenReady={${pb.playWhenReady}}, playbackState=$timebasedState, index=${pb.index}"
+            ": onPlaybackStateChanged: state=${pb.state} playWhenReady={${pb.playWhenReady}}, playbackState=$timebasedState, index=${pb.index}",
         )
+
+        isPlaying = timebasedState == TimebasedState.Playing
+
+        if (timebasedState == TimebasedState.Ended) onEnded()
 
         timebaseListener.onTimebasedPlaybackStateChanged(timebasedState)
     }
 
     override fun onCurrentLocatorChanges(locator: Locator) {
-        val readingOrderLink =
-            publication.readingOrder.find { link ->
-                link.href.toString() == locator.href.toString()
-            }
+        var emittingLocator = locator
 
-        if (locator.locations.position == null) {
-            val index =
-                publication.readingOrder.indexOfFirst { link ->
+        val readingOrderLink = publication.findReadingOrderLink(locator.href)
+
+        if (emittingLocator.locations.position == null) {
+            publication.readingOrder
+                .indexOfFirst { link ->
                     link == readingOrderLink
+                }.takeIf { it > -1 }
+                ?.let { index ->
+                    emittingLocator =
+                        emittingLocator.copy(
+                            locations = locator.locations.copy(position = index + 1),
+                        )
                 }
-            if (index != -1) {
-                val newLocator = locator.copy(
-                    locations = locator.locations.copy(position = index + 1)
-                )
-                timebaseListener.onTimebasedCurrentLocatorChanges(newLocator, readingOrderLink)
-                return
-            }
         }
 
-        timebaseListener.onTimebasedCurrentLocatorChanges(locator, readingOrderLink)
+        timebaseListener.onTimebasedCurrentLocatorChanges(emittingLocator, readingOrderLink)
+    }
+
+    /**
+     * Triggers when playback ends. This is needed to remove last decoration.
+     */
+    open fun onEnded() {
     }
 
     /**
@@ -130,7 +145,7 @@ abstract class TimebasedNavigator<P : MediaNavigator.Playback>(
     }
 
     /**
-     * Start playing. If fromLocator is provided from that position.
+     * Start playing. If [fromLocator] is provided from that position.
      */
     abstract suspend fun play(fromLocator: Locator?)
 
@@ -147,7 +162,7 @@ abstract class TimebasedNavigator<P : MediaNavigator.Playback>(
     /**
      * Go back in the playback.
      */
-    abstract suspend fun goBack()
+    abstract suspend fun goBackward()
 
     /**
      * Go forward in the playback.
@@ -155,12 +170,17 @@ abstract class TimebasedNavigator<P : MediaNavigator.Playback>(
     abstract suspend fun goForward()
 
     /**
-     * Seek to a specific position in the playback.
+     * Seek to a specific [locator] in the playback.
      */
     abstract suspend fun goToLocator(locator: Locator)
 
     /**
-     * Seek to a specific offset in seconds from the current position. Can be negative or positive.
+     * Seek to a specific [offset] in seconds from the current position. Can be negative or positive.
      */
     abstract suspend fun seekTo(offset: Double)
+
+    /**
+     * Seek to a [progression] in the current file.
+     */
+    abstract suspend fun seekToProgression(progression: Double): Boolean
 }

@@ -10,7 +10,6 @@
 import 'package:collection/collection.dart';
 import 'package:equatable/equatable.dart';
 import 'package:fimber/fimber.dart';
-import 'package:json_annotation/json_annotation.dart';
 import 'package:meta/meta.dart';
 
 import '../../../flutter_readium_platform_interface.dart';
@@ -39,6 +38,9 @@ class Publication with EquatableMixin implements JSONable {
   final Map<String, List<PublicationCollection>> subCollections;
 
   List<Link> get toc => tableOfContents;
+
+  /// Returns a flattened version of the table of contents, where all children links are recursively.
+  List<Link> get tocFlattened => tableOfContents.flatten();
 
   String get identifier => metadata.identifier ?? 'unidentified';
 
@@ -145,24 +147,21 @@ class Publication with EquatableMixin implements JSONable {
   }
 
   Locator? locatorFromLink(final Link link, {final MediaType? typeOverride}) {
-    final href = link.href;
-    final hashIndex = href.indexOf(_hrefEnd);
-    final hrefHead = hashIndex == -1 ? href : href.substring(0, hashIndex);
-    final hrefTail = hashIndex == -1 ? null : href.substring(hashIndex + 1);
-    final resourceLink = linkWithHref(hrefHead);
+    final (href, fragments) = link.href.splitPathAndFragment();
+    final resourceLink = linkWithHref(href);
     final type = resourceLink?.type ?? typeOverride?.name;
     final linkIndex = resourceLink == null ? -1 : readingOrder.indexOf(resourceLink);
     return type == null
         ? null
         : Locator(
-            href: hrefHead.stripLeadingSlash(),
+            href: href,
             type: type,
             title: resourceLink!.title ?? link.title,
             text: LocatorText(),
             locations: Locations(
-              cssSelector: hrefTail != null && hrefTail.isNotEmpty ? '#$hrefTail' : null,
-              fragments: hrefTail == null ? [] : [hrefTail],
-              progression: hrefTail == null ? 0 : null,
+              cssSelector: fragments != null && fragments.isNotEmpty ? '#$fragments' : null,
+              fragments: fragments == null ? [] : [fragments],
+              progression: fragments == null ? 0 : null,
               position: linkIndex == -1 ? null : linkIndex + 1,
             ),
           );
@@ -211,35 +210,4 @@ class Publication with EquatableMixin implements JSONable {
 
   bool get containsMediaOverlays =>
       readingOrder.any((link) => link.alternates.any((alt) => MediaType.syncMediaNarration.matchesFromName(alt.type)));
-}
-
-class PublicationJsonConverter extends JsonConverter<Publication, Map<String, dynamic>> {
-  const PublicationJsonConverter();
-
-  static final FimberLog _logger = FimberLog('PublicationJsonConverter');
-
-  @override
-  Publication fromJson(Map<String, dynamic> json) {
-    final publication = Publication.fromJson(json);
-    if (publication == null) {
-      _logger.w('Publication.fromJson returned null, creating dummy Publication');
-      return Publication(
-        metadata: Metadata(localizedTitle: LocalizedString.empty(), identifier: 'dummy'),
-      );
-    }
-    return publication;
-  }
-
-  @override
-  Map<String, dynamic> toJson(Publication publication) => publication.toJson();
-}
-
-class PublicationNullableJsonConverter extends JsonConverter<Publication?, Map<String, dynamic>?> {
-  const PublicationNullableJsonConverter();
-
-  @override
-  Publication? fromJson(Map<String, dynamic>? json) => Publication.fromJson(json);
-
-  @override
-  Map<String, dynamic>? toJson(Publication? publication) => publication?.toJson();
 }

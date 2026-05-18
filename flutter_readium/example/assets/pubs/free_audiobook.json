@@ -1,7 +1,7 @@
 {
   "readingOrder": [
     {
-      "href": "https://merkur.beta.dbb.dk/opds2/publication/free/49965/Vilde_v_sner_og_s_re_steder_-_Del_1-00001.mp3?format=WebPubAudioOnly",
+      "href": "Vilde_v_sner_og_s_re_steder_-_Del_1-00001.mp3?format=WebPubAudioOnly",
       "duration": 1683.692,
       "title": "Vilde væsner og sære steder, lydfortællinger Lolland.",
       "type": "audio/mpeg"
@@ -10,7 +10,17 @@
   "toc": [
     {
       "href": "Vilde_v_sner_og_s_re_steder_-_Del_1-00001.mp3#t=0",
-      "title": "Vilde væsner og sære steder, lydfortællinger Lolland."
+      "title": "Forside",
+      "children": [
+        {
+          "href": "Vilde_v_sner_og_s_re_steder_-_Del_1-00001.mp3#t=12",
+          "title": "Vilde væsner og sære steder, lydfortællinger Lolland."
+        },
+        {
+          "href": "Vilde_v_sner_og_s_re_steder_-_Del_1-00001.mp3#t=30",
+          "title": "Vilde væsner og sære steder, lydfortællinger Lolland - Del 1."
+        }
+      ]
     }
   ],
   "@context": "https://readium.org/webpub-manifest/context.jsonld",

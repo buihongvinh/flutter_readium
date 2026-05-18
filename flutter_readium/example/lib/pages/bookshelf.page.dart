@@ -59,10 +59,13 @@ class BookshelfPageState extends State<BookshelfPage> {
       final localPublications = await PublicationUtils.moveAssetPublicationsToReadiumStorage();
 
       for (String localPubPath in localPublications) {
+        debugPrint('Loading publication from local path: $localPubPath');
         final publication = await loadPublicationFromUrl(localPubPath);
         if (publication != null) {
           loadedPublications.add(publication);
           loadedPublicationURLs.add(localPubPath);
+        } else {
+          debugPrint('Failed to load publication from path: $localPubPath');
         }
       }
     }
@@ -110,7 +113,7 @@ class BookshelfPageState extends State<BookshelfPage> {
   @override
   Widget build(final BuildContext context) => Scaffold(
     restorationId: 'bookshelf_page',
-    appBar: AppBar(backgroundColor: Colors.deepPurple[200], title: Text('Bookshelf')),
+    appBar: AppBar(title: Text('Example Bookshelf')),
     body: SafeArea(
       child: _isLoading
           ? Center(child: CircularProgressIndicator())
@@ -190,7 +193,8 @@ class BookshelfPageState extends State<BookshelfPage> {
         // Use an in-memory saved locator as initial locator when opening the publication,
         // so that we can restore the last reading position.
         // This is just for demo purposes, in a real app you would probably want to persist the locator.
-        final savedInitialLocator = savedLocators[publication.identifier];
+        final pubUrlHashCode = publicationUrl.hashCode.toString();
+        final savedInitialLocator = savedLocators[pubUrlHashCode];
 
         try {
           context.read<PublicationBloc>().add(

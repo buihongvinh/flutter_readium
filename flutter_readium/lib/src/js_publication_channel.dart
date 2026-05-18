@@ -11,12 +11,15 @@ extension type ReadiumReader._(JSObject _) implements JSObject {
     JSString? initialPositionJson,
     JSString preferencesJson,
   );
-  external JSPromise getPublication(JSString link);
+  external JSPromise<JSString> getPublication(JSString link);
   external JSPromise goTo(JSString location);
-  external void goLeft();
-  external void goRight();
+  external void goBackward();
+  external void goForward();
   external void closePublication();
-  external JSPromise getResource(JSString linkString, JSBoolean? asBytes);
+  external JSPromise<JSString> getResource(
+    JSString linkString,
+    JSBoolean? asBytes,
+  );
   external void setEPUBPreferences(JSString newPreferencesString);
   external JSBoolean get isNavigatorReady;
 }
@@ -38,7 +41,12 @@ class JsPublicationChannel {
   }) async {
     try {
       await _readiumReader
-          .openPublication(publicationURL.toJS, pubId.toJS, initialPositionJson?.toJS, initialPreferences.toJS)
+          .openPublication(
+            publicationURL.toJS,
+            pubId.toJS,
+            initialPositionJson?.toJS,
+            initialPreferences.toJS,
+          )
           .toDart;
     } on Object catch (jsError, stackTrace) {
       String errorString = jsError.toString();
@@ -56,7 +64,7 @@ class JsPublicationChannel {
   Future<String> getPublication(String link) async {
     try {
       final publicationPromise = _readiumReader.getPublication(link.toJS);
-      final publicationString = await publicationPromise.toDart as String;
+      final publicationString = (await publicationPromise.toDart).toDart;
 
       return publicationString;
     } on Object catch (jsError, stackTrace) {
@@ -115,12 +123,12 @@ class JsPublicationChannel {
     }
   }
 
-  static void goLeft() {
-    _readiumReader.goLeft();
+  static void goBackward() {
+    _readiumReader.goBackward();
   }
 
-  static void goRight() {
-    _readiumReader.goRight();
+  static void goForward() {
+    _readiumReader.goForward();
   }
 
   void closePublication() {
@@ -130,7 +138,7 @@ class JsPublicationChannel {
   Future<String> getResource(String link, {bool? asBytes}) async {
     try {
       final resourceJS = _readiumReader.getResource(link.toJS, asBytes?.toJS);
-      var resourceString = await resourceJS.toDart as String;
+      final resourceString = (await resourceJS.toDart).toDart;
       return resourceString;
     } on Object catch (jsError, stackTrace) {
       String errorString = jsError.toString();

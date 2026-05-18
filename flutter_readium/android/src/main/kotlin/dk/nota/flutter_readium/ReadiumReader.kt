@@ -9,8 +9,8 @@ import android.view.ViewGroup
 import androidx.fragment.app.FragmentManager
 import androidx.savedstate.SavedStateRegistry
 import androidx.savedstate.SavedStateRegistryOwner
-import dk.nota.flutter_readium.events.ErrorEventChannel
-import dk.nota.flutter_readium.events.ReadiumErrorEvent
+import dk.nota.flutter_readium.events.ReadiumError
+import dk.nota.flutter_readium.events.ReadiumErrorEventChannel
 import dk.nota.flutter_readium.events.ReadiumReaderStatus
 import dk.nota.flutter_readium.events.ReadiumReaderStatusEventChannel
 import dk.nota.flutter_readium.events.TextLocatorEventChannel
@@ -21,19 +21,14 @@ import dk.nota.flutter_readium.navigators.EpubNavigator
 import dk.nota.flutter_readium.navigators.SyncAudiobookNavigator
 import dk.nota.flutter_readium.navigators.TTSNavigator
 import dk.nota.flutter_readium.navigators.TimebasedNavigator
-import dk.nota.flutter_readium.pdf.AndroidPdfDocumentFactory
 import io.flutter.plugin.common.BinaryMessenger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelChildren
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
@@ -42,13 +37,17 @@ import org.readium.navigator.media.tts.android.AndroidTtsEngine
 import org.readium.navigator.media.tts.android.AndroidTtsPreferences
 import org.readium.navigator.media.tts.android.AndroidTtsSettings
 import org.readium.r2.navigator.Decoration
-import org.readium.r2.navigator.epub.EpubPreferences
+import org.readium.r2.navigator.extensions.normalizeLocator
+import org.readium.r2.shared.DelicateReadiumApi
 import org.readium.r2.shared.ExperimentalReadiumApi
 import org.readium.r2.shared.InternalReadiumApi
 import org.readium.r2.shared.publication.Link
 import org.readium.r2.shared.publication.Locator
+import org.readium.r2.shared.publication.LocatorCollection
 import org.readium.r2.shared.publication.Publication
-import org.readium.r2.shared.publication.allAreHtml
+import org.readium.r2.shared.publication.html.cssSelector
+import org.readium.r2.shared.publication.services.search.SearchService
+import org.readium.r2.shared.publication.services.search.search
 import org.readium.r2.shared.util.AbsoluteUrl
 import org.readium.r2.shared.util.DebugError
 import org.readium.r2.shared.util.Language
@@ -58,6 +57,7 @@ import org.readium.r2.shared.util.Try.Companion.failure
 import org.readium.r2.shared.util.Url
 import org.readium.r2.shared.util.asset.Asset
 import org.readium.r2.shared.util.asset.AssetRetriever
+import org.readium.r2.shared.util.data.Container
 import org.readium.r2.shared.util.getOrElse
 import org.readium.r2.shared.util.http.DefaultHttpClient
 import org.readium.r2.shared.util.http.HttpRequest
@@ -69,14 +69,12 @@ import org.readium.r2.streamer.PublicationOpener.OpenError
 import org.readium.r2.streamer.parser.DefaultPublicationParser
 import java.lang.ref.WeakReference
 import kotlin.time.Duration
-import kotlin.time.Duration.Companion.milliseconds
 
 private const val TAG = "ReadiumReader"
 
 private const val stateKey = "dk.nota.flutter_readium.ReadiumReaderState"
 
 private const val currentPublicationUrlKey = "currentPublicationUrl"
-private const val cachedPdfFilePathKey = "cachedPdfFilePath"
 private const val ttsEnabledKey = "ttsEnabled"
 private const val audioEnabledKey = "audioEnabled"
 private const val syncAudioEnabledKey = "syncAudioEnabled"
@@ -91,7 +89,7 @@ private const val decorationStyleKey = "decorationStyle"
 // TODO: Support custom headers and authentication header for content files.
 
 @ExperimentalCoroutinesApi
-@OptIn(ExperimentalReadiumApi::class)
+@OptIn(ExperimentalReadiumApi::class, DelicateReadiumApi::class)
 object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.VisualListener {
     private val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -105,10 +103,7 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
 
     private var readiumReaderStatusEventChannel: ReadiumReaderStatusEventChannel? = null
 
-    private var errorEventChannel: ErrorEventChannel? = null
-
-    /** Navigator TTS dành riêng cho PDF (dùng PDFBox + Android TextToSpeech). */
-    private var pdfTtsNavigator: dk.nota.flutter_readium.navigators.PdfTtsNavigator? = null
+    private var errorChannel: ReadiumErrorEventChannel? = null
 
     private var readerViewRef: WeakReference<ReadiumReaderWidget>? = null
 
@@ -117,52 +112,36 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     // in-memory cached state
     private val state = mutableMapOf<String, Any?>()
 
-    private val currentTimebasedState = MutableStateFlow<TimebasedNavigator.TimebasedState?>(null)
+    private val currentReadiumTimebasedState =
+        MutableStateFlow(ReadiumTimebasedState.none())
 
-    private val currentTimebasedDuration = MutableStateFlow<Double?>(null)
-
-    private val currentTimebasedOffset = MutableStateFlow<Double?>(null)
-
-    private val currentTimebasedBuffer = MutableStateFlow<Long?>(null)
-
-    private val currentTimebasedLocator = MutableStateFlow<Locator?>(null)
+    private val currentTextLocator = MutableStateFlow<Locator?>(null)
 
     private var defaultHttpHeaders = mutableMapOf<String, String>()
 
     var decorationStyle: FlutterDecorationPreferences
-        get() = state[decorationStyleKey] as? FlutterDecorationPreferences
-            ?: FlutterDecorationPreferences()
+        get() =
+            state[decorationStyleKey] as? FlutterDecorationPreferences
+                ?: FlutterDecorationPreferences()
         set(value) {
             state[decorationStyleKey] = value
         }
 
-    fun createCurrentTimebasedReaderState(): Flow<ReadiumTimebasedState?> {
-        return combine(
-            currentTimebasedLocator.throttleLatest(100.milliseconds).distinctUntilChanged(),
-            currentTimebasedState.throttleLatest(100.milliseconds).distinctUntilChanged(),
-            currentTimebasedOffset.throttleLatest(100.milliseconds).distinctUntilChanged(),
-            currentTimebasedBuffer.throttleLatest(250.milliseconds).distinctUntilChanged(),
-            currentTimebasedDuration.throttleLatest(100.milliseconds).distinctUntilChanged(),
-        ) { locator, state, offset, buffer, duration ->
-            if (state == null) {
-                return@combine null
-            }
-
-            ReadiumTimebasedState(locator, state, offset, buffer, duration ?: 0.0)
-        }.throttleLatest(100.milliseconds).distinctUntilChanged()
-    }
-
     private val httpClient by lazy {
-        DefaultHttpClient(callback = object : DefaultHttpClient.Callback {
-            override suspend fun onStartRequest(request: HttpRequest): HttpTry<HttpRequest> {
-                val requestWithHeaders = request.copy {
-                    defaultHttpHeaders.toMap().forEach { (key, value) ->
-                        setHeader(key, value)
+        DefaultHttpClient(
+            callback =
+                object : DefaultHttpClient.Callback {
+                    override suspend fun onStartRequest(request: HttpRequest): HttpTry<HttpRequest> {
+                        val requestWithHeaders =
+                            request.copy {
+                                defaultHttpHeaders.toMap().forEach { (key, value) ->
+                                    setHeader(key, value)
+                                }
+                            }
+                        return Try.success(requestWithHeaders)
                     }
-                }
-                return Try.success(requestWithHeaders)
-            }
-        })
+                },
+        )
     }
 
     private var _assetRetriever: AssetRetriever? = null
@@ -183,10 +162,10 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     private var audiobookNavigator: AudiobookNavigator? = null
     private var syncAudiobookNavigator: SyncAudiobookNavigator? = null
 
-    private var epubNavigator: EpubNavigator? = null
+    private val timebasedNavigator: TimebasedNavigator<*>?
+        get() = audiobookNavigator ?: syncAudiobookNavigator ?: ttsNavigator
 
-    val epubCurrentLocator: Locator?
-        get() = epubNavigator?.currentLocator?.value
+    private var epubNavigator: EpubNavigator? = null
 
     private var _audioPreferences: FlutterAudioPreferences = FlutterAudioPreferences()
 
@@ -196,36 +175,44 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
 
     /**
      * The PublicationFactory is used to open publications.
-     * Sử dụng [AndroidPdfDocumentFactory] để hỗ trợ file PDF mà không cần thư viện thương mại.
      */
     private val publicationOpener: PublicationOpener
         get() {
             if (_publicationOpener == null) {
-                _publicationOpener = PublicationOpener(
-                    publicationParser = DefaultPublicationParser(
-                        context,
-                        assetRetriever = assetRetriever,
-                        httpClient = httpClient,
-                        // Sử dụng AndroidPdfDocumentFactory (dùng android.graphics.pdf.PdfRenderer tích hợp sẵn).
-                        // Thay thế bằng PsPDFKitDocumentFactory nếu cần tính năng PDF nâng cao (yêu cầu license).
-                        pdfFactory = AndroidPdfDocumentFactory(context),
-                    ),
-                )
+                _publicationOpener =
+                    PublicationOpener(
+                        publicationParser =
+                            DefaultPublicationParser(
+                                context,
+                                assetRetriever = assetRetriever,
+                                httpClient = httpClient,
+                                // Only required if you want to support PDF files using the PDFium adapter.
+                                pdfFactory = null, // PdfiumDocumentFactory(context)
+                            ),
+                    )
             }
 
             return _publicationOpener!!
         }
 
     // Initialize from plugin or anywhere you have an Application or Context.
-    fun attach(activity: Activity, messenger: BinaryMessenger) {
+    fun attach(
+        activity: Activity,
+        messenger: BinaryMessenger,
+    ) {
         unwrapToApplication(activity)?.let { appRef = WeakReference(it) }
 
         timedBasedStateEventChannel?.dispose()
         timedBasedStateEventChannel = TimedBasedStateEventChannel(messenger)
 
+        textLocatorEventChannel?.dispose()
         textLocatorEventChannel = TextLocatorEventChannel(messenger)
+
+        readiumReaderStatusEventChannel?.dispose()
         readiumReaderStatusEventChannel = ReadiumReaderStatusEventChannel(messenger)
-        errorEventChannel = ErrorEventChannel(messenger)
+
+        errorChannel?.dispose()
+        errorChannel = ReadiumErrorEventChannel(messenger)
 
         // store weak ref only
         (activity as? SavedStateRegistryOwner)?.savedStateRegistry?.let {
@@ -237,19 +224,20 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
             restoreState(it.consumeRestoredStateForKey(stateKey))
         }
 
-        createCurrentTimebasedReaderState().onEach {
-            Log.d(
-                TAG, "currentTimebasedReaderState: ${
-                    jsonEncode(
-                        it?.toJSON()
-                    )
-                }"
-            )
+        currentReadiumTimebasedState
+            .onEach {
+                Log.d(
+                    TAG,
+                    "currentTimebasedReaderState: ${
+                        jsonEncode(
+                            it.toJSON(),
+                        )
+                    }",
+                )
 
-            if (it != null) {
                 timedBasedStateEventChannel?.sendEvent(it)
-            }
-        }.launchIn(mainScope).let { jobs.add(it) }
+            }.launchIn(mainScope)
+            .let { jobs.add(it) }
     }
 
     private fun storeState(): Bundle {
@@ -287,11 +275,12 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
 
         Log.d(TAG, ":restoreState - currentPublicationUrl - $pubUrl")
         mainScope.launch {
-            val pub = openPublication(pubUrl).getOrElse {
-                Log.d(TAG, ":restoreState - failed to restore publication")
-                // TODO: Handle this somehow
-                return@launch
-            }
+            val pub =
+                openPublication(pubUrl).getOrElse {
+                    Log.d(TAG, ":restoreState - failed to restore publication")
+                    // TODO: Handle this somehow
+                    return@launch
+                }
 
             decorationStyle =
                 bundle.getParcelable(decorationStyleKey) as? FlutterDecorationPreferences
@@ -304,6 +293,7 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
                         EpubNavigator.restoreState(pub, this@ReadiumReader, state).apply {
                             initNavigator()
                             Log.d(TAG, ":storeState - epubNavigator restored")
+                            setDecorationStyle(decorationStyle)
                         }
                 }
             }
@@ -312,10 +302,11 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
                 // Restore TTS navigator
                 Log.d(TAG, ":storeState - restore tts navigator")
                 bundle.getBundle(ttsNavigatorStateKey)?.let { state ->
-                    ttsNavigator = TTSNavigator.restoreState(pub, this@ReadiumReader, state).apply {
-                        initNavigator()
-                        Log.d(TAG, ":storeState - ttsNavigator restored")
-                    }
+                    ttsNavigator =
+                        TTSNavigator.restoreState(pub, this@ReadiumReader, state).apply {
+                            initNavigator()
+                            Log.d(TAG, ":storeState - ttsNavigator restored")
+                        }
                 }
             }
 
@@ -336,13 +327,13 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
                 if (mediaOverlays != null) {
                     bundle.getBundle(syncAudioNavigatorStateKey)?.let { state ->
                         syncAudiobookNavigator =
-                            SyncAudiobookNavigator.restoreState(
-                                ap,
-                                mediaOverlays,
-                                this@ReadiumReader,
-                                state
-                            )
-                                .apply {
+                            SyncAudiobookNavigator
+                                .restoreState(
+                                    ap,
+                                    mediaOverlays,
+                                    this@ReadiumReader,
+                                    state,
+                                ).apply {
                                     initNavigator()
                                     Log.d(TAG, ":storeState - syncAudioNavigator restored")
                                 }
@@ -382,8 +373,8 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
         readiumReaderStatusEventChannel?.dispose()
         readiumReaderStatusEventChannel = null
 
-        errorEventChannel?.dispose()
-        errorEventChannel = null
+        errorChannel?.dispose()
+        errorChannel = null
 
         jobs.forEach { it.cancel() }
         jobs.clear()
@@ -392,8 +383,9 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
 
     // Safe getter — returns applicationContext or throws if not available.
     val application: Application
-        get() = appRef?.get()
-            ?: throw IllegalStateException("Application not initialized. Call ReadiumReader.attach(...) first.")
+        get() =
+            appRef?.get()
+                ?: throw IllegalStateException("Application not initialized. Call ReadiumReader.attach(...) first.")
 
     var currentReaderWidget: ReadiumReaderWidget?
         get() = readerViewRef?.get()
@@ -413,16 +405,12 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
             state[currentPublicationUrlKey] = value
         }
 
-    /**
-     * Đường dẫn tuyệt đối đến file PDF hiện tại, hoặc null nếu không phải PDF.
-     * Được cache khi [openPublication] thành công để tránh re-parse URL (vốn fragile
-     * khi tên file có dấu cách hoặc ký tự đặc biệt).
+    /***
+     * For EPUB profile, maps document [Url] to a list of all the cssSelectors in the document.
+     *
+     * This is used to find the current toc item.
      */
-    private var cachedPdfFilePath: String?
-        get() = state[cachedPdfFilePathKey] as String?
-        set(value) {
-            state[cachedPdfFilePathKey] = value
-        }
+    private var currentPublicationCssSelectorMap: MutableMap<Url, List<String>>? = null
 
     /**
      * Sets the headers used in the HTTP requests for fetching publication resources, including
@@ -436,18 +424,19 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     }
 
     private suspend fun assetToPublication(
-        asset: Asset
+        asset: Asset,
+        transformingContainerFactory: ((Container<Resource>) -> Container<Resource>)? = null,
     ): Try<Publication, OpenError> {
         val publication: Publication =
-            publicationOpener.open(asset, allowUserInteraction = true, onCreatePublication = {
-                container = TransformingContainer(container) { _: Url, resource: Resource ->
-                    resource.injectScriptsAndStyles()
+            publicationOpener
+                .open(asset, allowUserInteraction = true, onCreatePublication = {
+                    container = transformingContainerFactory?.let { it(container) } ?: container
+                })
+                .getOrElse { err: OpenError ->
+                    Log.e(TAG, "Error opening publication: $err")
+                    asset.close()
+                    return failure(err)
                 }
-            }).getOrElse { err: OpenError ->
-                Log.e(TAG, "Error opening publication: $err")
-                asset.close()
-                return failure(err)
-            }
         Log.d(TAG, "Open publication success: $publication")
         return Try.success(publication)
     }
@@ -456,21 +445,19 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
      * Load a publication from a String url.
      * Note: Remember to close the publication to avoid leaks.
      */
-    suspend fun loadPublication(
-        pubUrl: String?
-    ): Try<Publication, PublicationError> {
+    suspend fun loadPublication(pubUrl: String?): Try<Publication, PublicationError> {
         if (pubUrl == null) {
             return failure(
                 PublicationError.Unexpected(
-                    DebugError("missing argument")
-                )
+                    DebugError("missing argument"),
+                ),
             )
         }
 
         return AbsoluteUrl.invoke(pubUrl)?.let { pubUrl -> loadPublication(pubUrl) } ?: failure(
             PublicationError.Unexpected(
-                DebugError("Invalid Url")
-            )
+                DebugError("Invalid Url"),
+            ),
         )
     }
 
@@ -480,7 +467,8 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
      * Note: Remember to close the publication to avoid leaks.
      */
     suspend fun loadPublication(
-        pubUrl: AbsoluteUrl
+        pubUrl: AbsoluteUrl,
+        transformingContainerFactory: ((Container<Resource>) -> Container<Resource>)? = null,
     ): Try<Publication, PublicationError> {
         if (currentPublicationUrl == pubUrl.toString()) {
             // Current publication is the same as the one we are trying to load, return it.
@@ -492,15 +480,24 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
         return withContext(Dispatchers.IO) {
             try {
                 // TODO: should client provide mediaType to assetRetriever?
-                val asset: Asset = assetRetriever.retrieve(pubUrl)
-                    .getOrElse { error: AssetRetriever.RetrieveUrlError ->
-                        Log.e(TAG, "Error retrieving asset: $error from url:$pubUrl")
+                val asset: Asset =
+                    assetRetriever
+                        .retrieve(pubUrl)
+                        .getOrElse { error: AssetRetriever.RetrieveUrlError ->
+                            Log.e(TAG, "Error retrieving asset: $error from url:$pubUrl")
+                            return@withContext failure(PublicationError.invoke(error))
+                        }
+                val pub =
+                    assetToPublication(
+                        asset,
+                        transformingContainerFactory,
+                    ).getOrElse { error: OpenError ->
+                        Log.e(
+                            TAG,
+                            "Error loading asset to Publication object: $error from url:$pubUrl",
+                        )
                         return@withContext failure(PublicationError.invoke(error))
                     }
-                val pub = assetToPublication(asset).getOrElse { error: OpenError ->
-                    Log.e(TAG, "Error loading asset to Publication object: $error from url:$pubUrl")
-                    return@withContext failure(PublicationError.invoke(error))
-                }
                 Log.d(TAG, "Opened publication = ${pub.metadata.identifier} from url:$pubUrl")
                 return@withContext Try.success(pub)
             } catch (e: Throwable) {
@@ -512,30 +509,26 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     /**
      * Open a publication and set it as the current publication.
      */
-    suspend fun openPublication(
-        pubUrl: String?
-    ): Try<Publication, PublicationError> {
+    suspend fun openPublication(pubUrl: String?): Try<Publication, PublicationError> {
         if (pubUrl == null) {
             return failure(
                 PublicationError.Unexpected(
-                    DebugError("missing argument")
-                )
+                    DebugError("missing argument"),
+                ),
             )
         }
 
         return AbsoluteUrl.invoke(pubUrl)?.let { pubUrl -> openPublication(pubUrl) } ?: failure(
             PublicationError.Unexpected(
-                DebugError("Invalid Url")
-            )
+                DebugError("Invalid Url"),
+            ),
         )
     }
 
     /**
      * Open a publication and set it as the current publication.
      */
-    suspend fun openPublication(
-        pubUrl: AbsoluteUrl
-    ): Try<Publication, PublicationError> {
+    suspend fun openPublication(pubUrl: AbsoluteUrl): Try<Publication, PublicationError> {
         if (currentPublicationUrl == pubUrl.toString()) {
             // Current publication is the same as the one we are trying to open, return it.
             // If you need to reload the publication, you need to close it first.
@@ -547,32 +540,33 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
         // Close previously opened publication to avoid leaks.
         closePublication()
 
-        val pub = loadPublication(pubUrl).getOrElse { e -> return failure(e) }
+        val transformingContainerFactory =
+            fun(container: Container<Resource>): Container<Resource> {
+                return TransformingContainer(container) { url: Url, resource: Resource ->
+                    val publication = currentPublication ?: return@TransformingContainer resource
+                    val navigator = epubNavigator ?: return@TransformingContainer resource
+
+                    val tocIds =
+                        publication.tableOfContents
+                            .flattenChildren()
+                            .mapNotNull { it.href.resolve().fragment }
+                    val epubPreferences = navigator.preferences
+                    if (url.extension?.value?.endsWith("html", ignoreCase = true) == true) {
+                        resource.injectScriptsAndStyles(tocIds, epubPreferences)
+                    } else {
+                        resource
+                    }
+                }
+            }
+
+        val pub =
+            loadPublication(
+                pubUrl,
+                transformingContainerFactory,
+            ).getOrElse { e -> return failure(e) }
 
         _currentPublication = pub
         currentPublicationUrl = pubUrl.toString()
-
-        // Cache đường dẫn file PDF ngay tại đây để tránh re-parse URL sau này.
-        // android.net.Uri.parse() decode percent-encoding (%20 → space) đúng cách
-        // và không throw exception khi URL có ký tự đặc biệt.
-        cachedPdfFilePath = if (isPdfPublication(pub)) {
-            val urlStr = pubUrl.toString()
-            val path = when {
-                urlStr.startsWith("file:") ->
-                    try {
-                        android.net.Uri.parse(urlStr).path
-                    } catch (e: Exception) {
-                        Log.e(TAG, "openPublication: lỗi parse file URL '$urlStr': $e")
-                        null
-                    }
-                urlStr.startsWith("/") -> urlStr
-                else -> null
-            }
-            Log.d(TAG, "openPublication: cached PDF path = '$path' (from URL: $urlStr)")
-            path
-        } else {
-            null
-        }
 
         return Try.success(pub)
     }
@@ -582,9 +576,10 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
      * Note: Remember to close the publication to avoid leaks.
      */
     suspend fun loadPublicationFromUrl(urlStr: String): Try<Publication, PublicationError> {
-        val pubUrl = resolvePubUrl(urlStr).getOrElse {
-            return failure(PublicationError.InvalidPublicationUrl(urlStr))
-        }
+        val pubUrl =
+            resolvePubUrl(urlStr).getOrElse {
+                return failure(PublicationError.InvalidPublicationUrl(urlStr))
+            }
 
         Log.d(TAG, "loadPublicationFromUrl: $pubUrl")
 
@@ -597,9 +592,10 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
      * Note: This sets the publication as the current publication.
      */
     suspend fun openPublicationFromUrl(urlStr: String): Try<Publication, PublicationError> {
-        val pubUrl = resolvePubUrl(urlStr).getOrElse {
-            return failure(PublicationError.InvalidPublicationUrl(urlStr))
-        }
+        val pubUrl =
+            resolvePubUrl(urlStr).getOrElse {
+                return failure(PublicationError.InvalidPublicationUrl(urlStr))
+            }
 
         Log.d(TAG, "openPublicationFromUrl: $pubUrl")
 
@@ -608,99 +604,162 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
 
     /**
      * Helper function for resolving a URL and make sure a file path is turned into a URL.
-     *
-     * Lưu ý: Sử dụng [java.io.File.toURI] thay vì ghép chuỗi "file://" để đảm bảo
-     * tên file có dấu cách hoặc ký tự đặc biệt được percent-encode đúng cách
-     * (ví dụ: "Tham Do Tiem Thuc.pdf" → "file:///…/Tham%20Do%20Tiem%20Thuc.pdf").
-     * Nếu không encode, [AbsoluteUrl] sẽ trả về null và gây lỗi notFound.
      */
     private fun resolvePubUrl(urlStr: String): Try<AbsoluteUrl, PublicationError> {
         var pubUrlStr = urlStr
         // If URL is neither http nor file, assume it is a local file reference.
         if (!pubUrlStr.startsWith("http") && !pubUrlStr.startsWith("file")) {
-            // File.toURI() percent-encodes spaces và ký tự đặc biệt trong đường dẫn
-            pubUrlStr = java.io.File(pubUrlStr).toURI().toString()
+            pubUrlStr = "file://$pubUrlStr"
         }
         // Create AbsoluteUrl, return PublicationError.InvalidPublicationUrl if null
-        val pubUrl = AbsoluteUrl(pubUrlStr) ?: return failure(
-            PublicationError.InvalidPublicationUrl(pubUrlStr)
-        )
+        val pubUrl =
+            AbsoluteUrl(pubUrlStr) ?: return failure(
+                PublicationError.InvalidPublicationUrl(pubUrlStr),
+            )
 
         return Try.success(pubUrl)
     }
 
-    suspend fun closePublication() {
-        mainScope.async {
-            _currentPublication?.close()
-            _currentPublication = null
+    fun closePublication() {
+        _currentPublication?.close()
+        _currentPublication = null
+        currentPublicationCssSelectorMap = null
 
-            pdfTtsNavigator?.dispose()
-            pdfTtsNavigator = null
+        ttsNavigator?.dispose()
+        ttsNavigator = null
+        audiobookNavigator?.dispose()
+        audiobookNavigator = null
+        syncAudiobookNavigator?.dispose()
+        syncAudiobookNavigator = null
 
-            ttsNavigator?.dispose()
-            ttsNavigator = null
-            audiobookNavigator?.dispose()
-            audiobookNavigator = null
-            syncAudiobookNavigator?.dispose()
-            syncAudiobookNavigator = null
+        _audioPreferences = FlutterAudioPreferences()
 
-            _audioPreferences = FlutterAudioPreferences()
+        currentReadiumTimebasedState.value = ReadiumTimebasedState()
+        currentTextLocator.value = null
 
-            state.clear()
-        }.await()
+        state.clear()
     }
 
     override fun onTimebasedPlaybackStateChanged(timebasedState: TimebasedNavigator.TimebasedState) {
         Log.d(TAG, ":onTimebasedPlaybackStateChanged $timebasedState")
-        currentTimebasedState.value = timebasedState
+        currentReadiumTimebasedState.value = currentReadiumTimebasedState.value.copyWith(state = timebasedState)
     }
 
     override fun onTimebasedBufferChanged(buffer: Duration?) {
         Log.d(TAG, ":onTimebasedBufferChanged $buffer")
-        currentTimebasedBuffer.value = buffer?.inWholeMilliseconds
+
+        currentReadiumTimebasedState.value = currentReadiumTimebasedState.value.copyWith(currentBuffered = buffer?.inWholeMilliseconds)
     }
 
     override fun onTimebasedPlaybackFailure(error: PublicationError) {
         Log.d(TAG, ":onTimebasedPlaybackFailure $error")
-        // TODO: Notify client
+
+        errorChannel?.sendEvent(ReadiumError.invoke(error))
     }
 
+    @OptIn(InternalReadiumApi::class)
     override fun onTimebasedCurrentLocatorChanges(
-        locator: Locator, currentReadingOrderLink: Link?
+        locator: Locator,
+        currentReadingOrderLink: Link?,
     ) {
         val duration = currentReadingOrderLink?.duration
-        val timeOffset =
-            locator.locations.fragments.find { it.startsWith("t=") }?.substring(2)?.toDoubleOrNull()
-                ?: (duration?.let { duration ->
-                    locator.locations.progression?.let { prog -> duration * prog }
-                })
+        val timeOffset = locator.locations.timeWithDuration(duration)
 
         Log.d(TAG, ":onTimebasedCurrentLocatorChanges $locator, timeOffset=$timeOffset")
 
-        currentTimebasedOffset.value = timeOffset?.let { it * 1000 }
-        currentTimebasedDuration.value = duration?.let { it * 1000 }
-        currentTimebasedLocator.value = locator
+        currentReadiumTimebasedState.value =
+            currentReadiumTimebasedState.value.copyWith(
+                currentOffset = timeOffset?.inWholeMilliseconds?.toDouble(),
+                currentDuration = duration?.let { it * 1000 },
+                currentLocator = locator,
+            )
     }
 
     override fun onTimebasedLocationChanged(locator: Locator) {
         Log.d(TAG, ":onTimebasedLocationChanged $locator")
 
-        currentReaderWidget?.go(locator, true)
+        mainScope.launch {
+            epubSyncToLocator(locator, true)
+        }
+    }
+
+    /**
+     * Find the current table of content item from a locator.
+     */
+    suspend fun epubEnrichLocatorWithTocHref(locator: Locator): Locator {
+        val publication =
+            currentPublication ?: run {
+                Log.e(TAG, ":epubFindCurrentToc - no currentPublication")
+                return locator
+            }
+
+        if (!publication.conformsTo(Publication.Profile.EPUB)) {
+            Log.e(TAG, ":epubFindCurrentToc - not an EPUB profile")
+            return locator
+        }
+
+        // This locator already has a tocHref, add title and return it.
+        locator.locations.tocHref?.let { tocHref ->
+            return locator.copy(title = publication.getTitleFromTocHref(tocHref))
+        }
+
+        val cssSelector =
+            locator.locations.cssSelector ?: run {
+                Log.e(TAG, ":epubFindCurrentToc - missing cssSelector in locator")
+                return locator
+            }
+
+        val resultLocator = locator.copy()
+
+        val cleanHref = resultLocator.href.cleanHref()
+        val tocLinks =
+            publication.tableOfContents.flattenChildren().filter {
+                it.href
+                    .resolve()
+                    .cleanHref()
+                    .path == cleanHref.path
+            }
+
+        val documentCssSelectors = epubGetAllDocumentCssSelectors(resultLocator.href)
+        val idx =
+            documentCssSelectors.indexOf(cssSelector).takeIf { it > -1 } ?: run {
+                // cssSelector wasn't found in the list of document cssSelectors, best effort is to assume first
+                Log.d(
+                    TAG,
+                    ":epubFindCurrentToc cssSelector:$cssSelector not found in contentIds, assume idx = 0",
+                )
+                0
+            }
+
+        val toc =
+            tocLinks.associateBy { documentCssSelectors.indexOf("#${it.href.resolve().fragment}") }
+
+        val tocItem =
+            toc.entries.lastOrNull { it.key <= idx }?.value ?: toc.entries.firstOrNull()?.value
+                ?: run {
+                    Log.d(TAG, ":epubFindCurrentToc - no tocItem found")
+                    return resultLocator
+                }
+
+        return resultLocator
+            .copy(
+                title = tocItem.title,
+            ).copyWithTocHref(tocItem)
     }
 
     @OptIn(InternalReadiumApi::class)
     suspend fun epubEnable(
         initialLocator: Locator?,
-        initialPreferences: EpubPreferences,
+        initialPreferences: FlutterEpubPreferences,
         fragmentManager: FragmentManager,
         viewGroup: ViewGroup,
-        readerWidget: ReadiumReaderWidget
+        readerWidget: ReadiumReaderWidget,
     ) {
         val pub = currentPublication ?: throw Exception("Publication not opened cannot enable epub")
 
         currentReaderWidget = readerWidget
 
-        val isEpub = pub.conformsTo(Publication.Profile.EPUB) || pub.readingOrder.allAreHtml
+        val isEpub = pub.conformsTo(Publication.Profile.EPUB)
         if (!isEpub) {
             throw Exception("Publication is not an EPUB, cannot enable epub navigator")
         }
@@ -715,20 +774,33 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
                 initNavigator()
                 epubNavigator = this
                 attachEpubNavigator(fragmentManager, viewGroup)
+                setDecorationStyle(decorationStyle)
                 return@withScope
             }
         }
     }
 
-    suspend fun attachEpubNavigator(fragmentManager: FragmentManager?, viewGroup: ViewGroup?) {
+    suspend fun attachEpubNavigator(
+        fragmentManager: FragmentManager?,
+        viewGroup: ViewGroup?,
+    ) {
         if (fragmentManager == null || viewGroup == null) {
-            Log.d(TAG, "attachEpubNavigator: Missing fragmentManager or viewGroup")
+            Log.d(TAG, "::attachEpubNavigator: Missing fragmentManager or viewGroup")
             return
         }
 
-        mainScope.async {
-            epubNavigator?.attachNavigator(fragmentManager, viewGroup)
-        }.await()
+        val navigator =
+            epubNavigator ?: run {
+                Log.d(TAG, "::attachEpubNavigator: Tried to attach a non-existing epub navigator?")
+                return
+            }
+
+        withScope(mainScope) {
+            // Queue decorations to be applied when the epubNavigator is attached.
+            decorationsUpdated()
+
+            navigator.attachNavigator(fragmentManager, viewGroup)
+        }
     }
 
     fun epubClose() {
@@ -738,70 +810,69 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     }
 
     suspend fun ttsEnable(ttsPrefs: FlutterTtsPreferences) {
-        val pub = currentPublication ?: throw Exception("Publication not opened cannot enable tts")
-
-        if (isCurrentPublicationPdf()) {
-            // ── PDF: trích xuất text bằng PDFBox, phát bằng Android TextToSpeech ──
-            val filePath = cachedPdfFilePath
-                ?: throw Exception("PDF file path not cached — openPublication() phải chạy trước")
-
-            pdfTtsNavigator?.dispose()
-            pdfTtsNavigator = dk.nota.flutter_readium.navigators.PdfTtsNavigator(
-                context           = application,
-                pdfFilePath       = filePath,
-                publication       = pub,
-                preferences       = ttsPrefs,
-                timebaseListener  = this@ReadiumReader,
-            ).also { it.initialize() }
-
-        } else {
-            // ── EPUB/WebPub: Readium TtsNavigator như cũ ──────────────────────────
-            ttsNavigator?.dispose()
-            ttsNavigator = TTSNavigator(pub, this@ReadiumReader, null, ttsPrefs).apply {
-                initNavigator()
-            }
-        }
+        currentPublication?.let {
+            ttsNavigator =
+                TTSNavigator(it, this@ReadiumReader, currentTextLocator.value, ttsPrefs).apply {
+                    initNavigator()
+                }
+        } ?: throw Exception("Publication not opened cannot enable tts")
     }
 
     suspend fun ttsSetPreferences(ttsPrefs: FlutterTtsPreferences) {
-        if (pdfTtsNavigator != null) {
-            pdfTtsNavigator?.updatePreferences(ttsPrefs)
-        } else {
-            ttsNavigator?.updatePreferences(ttsPrefs)
-                ?: throw Exception("TTS is not enabled, can't set preferences")
-        }
+        ttsNavigator?.updatePreferences(ttsPrefs)
+            ?: throw Exception("TTS is not enabled, can't set preferences")
     }
 
     suspend fun setDecorationStyle(style: FlutterDecorationPreferences) {
         decorationStyle = style
 
+        decorationsUpdated()
+    }
+
+    suspend fun decorationsUpdated() {
         ttsNavigator?.decorationsUpdated()
         syncAudiobookNavigator?.decorationsUpdated()
     }
 
+    /**
+     * Cached list of android tts voices.
+     */
+    private var availableTtsVoices: Set<AndroidTtsEngine.Voice>? = null
+
+    /**
+     * Get available tts voices
+     */
     suspend fun ttsGetAvailableVoices(): Set<AndroidTtsEngine.Voice> {
+        // Already loaded, return existing list.
+        availableTtsVoices?.takeIf { it.isNotEmpty() }?.let { return it }
+
         // Get the available voices from the TTS navigator.
         // If the TTS navigator hasn't been initialized, create a dummy AndroidTtsEngine.
-        return ttsNavigator?.voices ?: AndroidTtsEngine.invoke(
-            context,
-            {
-                AndroidTtsSettings(
-                    Language("C"),
-                    false,
-                    0.0,
-                    0.0,
-                    mapOf()
-                )
-            },
-            { language, availableVoices -> null },
-            AndroidTtsPreferences())?.voices ?: setOf()
+        availableTtsVoices = ttsNavigator?.voices ?: AndroidTtsEngine
+            .invoke(
+                context,
+                {
+                    AndroidTtsSettings(
+                        Language("C"),
+                        false,
+                        0.0,
+                        0.0,
+                        mapOf(),
+                    )
+                },
+                { language, availableVoices -> null },
+                AndroidTtsPreferences(),
+            )?.voices
+
+        return availableTtsVoices ?: setOf()
     }
 
-    fun ttsGetPreferences(): FlutterTtsPreferences? {
-        return ttsNavigator?.preferences
-    }
+    fun ttsGetPreferences(): FlutterTtsPreferences? = ttsNavigator?.preferences
 
-    suspend fun ttsSetPreferredVoice(voiceId: String?, language: String?) {
+    suspend fun ttsSetPreferredVoice(
+        voiceId: String?,
+        language: String?,
+    ) {
         if (voiceId == null) {
             Log.d(TAG, ":ttsSetPreferredVoice - missing voiceId")
             return
@@ -812,144 +883,205 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
             return
         }
 
-        if (pdfTtsNavigator != null) {
-            pdfTtsNavigator?.setPreferredVoice(voiceId, language)
-        } else {
-            ttsNavigator?.setPreferredVoice(voiceId, language)
-        }
+        ttsNavigator?.setPreferredVoice(voiceId, language)
     }
 
     suspend fun play(locator: Locator?) {
-        var fromLocator = locator
+        val fromLocator =
+            locator ?: currentReadiumTimebasedState.value.currentLocator ?: currentTextLocator.value
+                ?: epubFirstVisibleElementLocator()
 
-        if (fromLocator == null) {
-            fromLocator = currentReaderWidget?.getFirstVisibleLocator()
-        }
+        Log.d(TAG, ":play($locator) - fromLocator:$fromLocator")
 
-        pdfTtsNavigator?.play(fromLocator)
-        audiobookNavigator?.play(fromLocator)
-        syncAudiobookNavigator?.play(fromLocator)
-        ttsNavigator?.play(fromLocator)
+        timebasedNavigator?.play(fromLocator)
     }
 
     suspend fun pause() {
-        pdfTtsNavigator?.pause()
-        audiobookNavigator?.pause()
-        syncAudiobookNavigator?.pause()
-        ttsNavigator?.pause()
+        timebasedNavigator?.pause()
     }
 
     suspend fun resume() {
-        pdfTtsNavigator?.resume()
-        audiobookNavigator?.resume()
-        syncAudiobookNavigator?.resume()
-        ttsNavigator?.resume()
+        timebasedNavigator?.resume()
     }
 
     suspend fun stop() {
-        pdfTtsNavigator?.apply {
-            stop()
-            dispose()
-            pdfTtsNavigator = null
-        }
-
         audiobookNavigator?.apply {
             pause()
             dispose()
+
             audiobookNavigator = null
         }
 
         syncAudiobookNavigator?.apply {
+            pause()
             dispose()
+
             syncAudiobookNavigator = null
         }
 
         ttsNavigator?.apply {
             pause()
             dispose()
+
             ttsNavigator = null
         }
+
+        currentReadiumTimebasedState.value = ReadiumTimebasedState.none()
     }
 
     /**
      * Skip backwards.
      */
     suspend fun previous() {
-        pdfTtsNavigator?.goBack()
-        audiobookNavigator?.goBack()
-        syncAudiobookNavigator?.goBack()
-        ttsNavigator?.goBack()
+        timebasedNavigator?.goBackward()
     }
 
     /**
      * Skip forwards.
      */
     suspend fun next() {
-        pdfTtsNavigator?.goForward()
-        audiobookNavigator?.goForward()
-        syncAudiobookNavigator?.goForward()
-        ttsNavigator?.goForward()
+        timebasedNavigator?.goForward()
     }
 
     /**
      * Go to a specific locator.
      */
     suspend fun goToLocator(locator: Locator) {
-        audiobookNavigator?.goToLocator(locator)
-        syncAudiobookNavigator?.goToLocator(locator)
-        ttsNavigator?.goToLocator(locator)
-        epubGoToLocator(locator, true)
+        val publication =
+            currentPublication ?: run {
+                Log.e(TAG, "::goToLocator called without a current publication")
+                return
+            }
+        val toLocator = publication.normalizeLocator(locator)
+        timebasedNavigator?.let { navigator ->
+            Log.d(TAG, "::goToLocator - timebased $toLocator")
+            navigator.goToLocator(
+                toLocator.copy(
+                    text = Locator.Text(),
+                ),
+            )
+
+            return
+        }
+
+        epubGoToLocator(toLocator, true)
     }
 
-    suspend fun audioSeek(offsetSeconds: Double) {
-        audiobookNavigator?.seekTo(offsetSeconds)
-        syncAudiobookNavigator?.seekTo(offsetSeconds)
+    /**
+     * Go to a progression value between 0.0 and 1.0
+     */
+    suspend fun goToProgression(progression: Double) {
+        timebasedNavigator?.let { timebasedNavigator ->
+            Log.d(TAG, "::goToProgression - timebased $progression")
+            timebasedNavigator.seekToProgression(progression)
+
+            return
+        }
+
+        epubGoToProgression(progression)
+    }
+
+    suspend fun searchInPublication(query: String): Try<List<LocatorCollection>, Error> {
+        val pub =
+            currentPublication ?: return failure(
+                Error("no publication"),
+            )
+        val resultIterator =
+            pub.search(query, SearchService.Options()) ?: return failure(
+                Error("SearchService unavailable"),
+            )
+        val results = mutableListOf<LocatorCollection>()
+        while (true) {
+            val result = resultIterator.next()
+            if (result.isFailure) break
+            val collection = result.getOrNull() ?: break
+            results.add(collection)
+        }
+        return Try.success(results.toList())
+    }
+
+    /**
+     * Seek to a specific [offset] in seconds from the current position. Can be negative or positive.
+     */
+    suspend fun audioSeek(offset: Double) {
+        val navigator =
+            timebasedNavigator ?: run {
+                Log.e(TAG, "::audioSeek - called with an active timebase navigator")
+                return
+            }
+
+        navigator.seekTo(offset)
     }
 
     @OptIn(InternalReadiumApi::class)
-    suspend fun audioEnable(initialLocator: Locator?, preferences: FlutterAudioPreferences) {
+    suspend fun audioEnable(
+        locator: Locator?,
+        preferences: FlutterAudioPreferences,
+    ) {
         _audioPreferences = preferences
 
-        currentPublication?.let { publication ->
-            // Handle karaoke books - by creating a pseudo audio publication from the media overlays.
-            val (ap, overlays) = publication.makeSyncAudiobook()
-
-            audiobookNavigator?.dispose()
-            syncAudiobookNavigator?.dispose()
-            audiobookNavigator = null
-            syncAudiobookNavigator = null
-
-            if (overlays == null) {
-                audiobookNavigator = AudiobookNavigator(
-                    ap, this@ReadiumReader, initialLocator, preferences
-                ).apply {
-                    initNavigator()
-                }
-            } else {
-                val ail = initialLocator ?: epubNavigator?.currentLocator?.value
-                syncAudiobookNavigator = SyncAudiobookNavigator(
-                    ap, overlays, this@ReadiumReader, ail, preferences
-                ).apply {
-                    initNavigator()
-                }
+        val publication =
+            currentPublication ?: run {
+                throw Exception("Publication not opened")
             }
-        } ?: throw Exception("Publication not opened")
+
+        val initialLocator = locator?.let { publication.normalizeLocator(it) }
+
+        // Handle karaoke books - by creating a pseudo audio publication from the media overlays.
+        val (ap, overlays) = publication.makeSyncAudiobook()
+
+        audiobookNavigator?.dispose()
+        syncAudiobookNavigator?.dispose()
+        audiobookNavigator = null
+        syncAudiobookNavigator = null
+
+        if (overlays == null) {
+            Log.d(TAG, "::audioEnable - plain audiobook")
+
+            audiobookNavigator =
+                AudiobookNavigator(
+                    ap,
+                    this@ReadiumReader,
+                    initialLocator,
+                    preferences,
+                ).apply {
+                    initNavigator()
+                }
+        } else {
+            Log.d(TAG, "::audioEnable - media-overlay book")
+            val ail = initialLocator ?: epubNavigator?.currentLocator?.value
+            syncAudiobookNavigator =
+                SyncAudiobookNavigator(
+                    ap,
+                    overlays,
+                    this@ReadiumReader,
+                    ail,
+                    preferences,
+                ).apply {
+                    initNavigator()
+                }
+        }
     }
 
     suspend fun audioUpdatePreferences(preferences: FlutterAudioPreferences) {
         _audioPreferences = preferences
 
-        mainScope.async {
-            audiobookNavigator?.updatePreferences(preferences)
-                ?: syncAudiobookNavigator?.updatePreferences(preferences)
-                ?: throw Exception("Audio not enabled, cannot update preferences")
-        }.await()
+        val navigator =
+            audiobookNavigator ?: syncAudiobookNavigator ?: run {
+                Log.e(TAG, "::audioUpdatePreferences called without an active audiobook navigator")
+                throw Exception("Audio not enabled, cannot update preferences")
+            }
+
+        navigator.updatePreferences(preferences)
     }
 
     suspend fun applyDecorations(
-        decorations: List<Decoration>, group: String
+        decorations: List<Decoration>,
+        group: String,
     ) {
-        epubNavigator?.applyDecorations(decorations, group)
+        val navigator = epubNavigator ?: return
+
+        navigator.applyDecorations(decorations, group)
     }
 
     override fun onPageLoaded() {
@@ -957,7 +1089,9 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     }
 
     override fun onPageChanged(
-        pageIndex: Int, totalPages: Int, locator: Locator
+        pageIndex: Int,
+        totalPages: Int,
+        locator: Locator,
     ) {
         currentReaderWidget?.onPageChanged(pageIndex, totalPages, locator)
     }
@@ -974,54 +1108,131 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
         currentReaderWidget?.onVisualReaderIsReady()
     }
 
-    suspend fun getFirstVisibleLocator(): Locator? {
-        return epubNavigator?.firstVisibleElementLocator()
+    suspend fun epubFirstVisibleElementLocator(): Locator? {
+        val navigator =
+            epubNavigator ?: run {
+                Log.d(TAG, ":epubFirstVisibleElementLocator called without a epubNavigator")
+                return null
+            }
+
+        return navigator.firstVisibleElementLocator()
     }
 
     suspend fun epubEvaluateJavascript(script: String): String? {
-        return epubNavigator?.evaluateJavascript(script)
+        val navigator =
+            epubNavigator ?: run {
+                Log.d(TAG, ":epubEvaluateJavascript called without a epubNavigator")
+                return null
+            }
+
+        return navigator.evaluateJavascript(script)
     }
 
     /**
      * Update EPUB navigator preferences.
      */
-    fun epubUpdatePreferences(preferences: EpubPreferences) {
-        epubNavigator?.updatePreferences(preferences)
+    suspend fun epubUpdatePreferences(preferences: FlutterEpubPreferences) {
+        val navigator =
+            epubNavigator ?: run {
+                Log.d(TAG, ":epubUpdatePreferences called without a epubNavigator")
+                return
+            }
+
+        navigator.updatePreferences(preferences)
     }
 
     /**
-     * Go to a specific locator in the EPUB navigator, without scrolling to the locator position.
+     * Navigate backward in the EPUB navigator.
      */
-    suspend fun epubGo(locator: Locator, animated: Boolean) {
-        epubNavigator?.go(locator, animated)
+    suspend fun epubGoBackward(animated: Boolean) {
+        val navigator =
+            epubNavigator ?: run {
+                Log.d(TAG, ":epubGoBackward called without a epubNavigator")
+                return
+            }
+
+        navigator.goBackward(animated)
     }
 
     /**
-     * Go left (previous page) in the EPUB navigator.
+     * Navigate forward in the EPUB navigator.
      */
-    fun epubGoLeft(animated: Boolean) {
-        epubNavigator?.goLeft(animated)
-    }
+    suspend fun epubGoForward(animated: Boolean) {
+        val navigator =
+            epubNavigator ?: run {
+                Log.d(TAG, ":epubGoForward called without a epubNavigator")
+                return
+            }
 
-    /**
-     * Go right (next page) in the EPUB navigator.
-     */
-    fun epubGoRight(animated: Boolean) {
-        epubNavigator?.goRight(animated)
+        navigator.goForward(animated)
     }
 
     /**
      * Go to a specific locator in the EPUB navigator, this scrolls to the locator position if needed.
      */
-    suspend fun epubGoToLocator(locator: Locator, animated: Boolean) {
-        epubNavigator?.goToLocator(locator, animated)
+    suspend fun epubGoToLocator(
+        locator: Locator,
+        animated: Boolean,
+    ) {
+        val publication =
+            currentPublication ?: run {
+                Log.e(TAG, "::epubGoToLocator called wihtout an open publication")
+                return
+            }
+
+        val toLocator = publication.normalizeLocator(locator)
+
+        val navigator =
+            epubNavigator ?: run {
+                Log.d(TAG, ":epubGoToLocator called without a epubNavigator")
+                return
+            }
+
+        navigator.goToLocator(toLocator, animated)
+    }
+
+    suspend fun epubGoToProgression(progression: Double) {
+        val navigator =
+            epubNavigator ?: run {
+                Log.d(TAG, ":epubGoToProgression called without a epubNavigator")
+                return
+            }
+
+        navigator.scrollToProgression(progression)
     }
 
     /**
-     * Get locator fragments from EPUB navigator.
+     * Sync epub to [SyncAudiobookNavigator] or [TTSNavigator]
      */
-    suspend fun epubGetLocatorFragments(locator: Locator): Locator? {
-        return epubNavigator?.getLocatorFragments(locator)
+    suspend fun epubSyncToLocator(
+        locator: Locator,
+        animated: Boolean,
+        segmentDuration: Double? = null,
+    ) {
+        val navigator = epubNavigator ?: return
+        withScope(mainScope) {
+            if (navigator.preferences?.disableSynchronization == true) {
+                return@withScope
+            }
+
+            navigator.goToLocator(locator, animated, segmentDuration)
+        }
+    }
+
+    /**
+     * Get all cssSelectors for an EPUB file.
+     * Note: These only includes text elements, so body, page breaks etc are not included.
+     */
+    suspend fun epubGetAllDocumentCssSelectors(href: Url): List<String> {
+        val cssSelectorMap = currentPublicationCssSelectorMap ?: mutableMapOf()
+        currentPublicationCssSelectorMap = cssSelectorMap
+
+        val cleanHref = href.cleanHref()
+        return cssSelectorMap.getOrPut(cleanHref) {
+            currentPublication?.findAllCssSelectors(
+                cleanHref,
+            ) ?: listOf()
+        }
     }
 
     /**
@@ -1032,58 +1243,18 @@ object ReadiumReader : TimebasedNavigator.TimebasedListener, EpubNavigator.Visua
     }
 
     /**
+     * Emit an error event to the flutter layer.
+     */
+    fun emitError(error: ReadiumError) {
+        errorChannel?.sendEvent(error)
+    }
+
+    /**
      * Emit text locator to the flutter layer
      */
     fun emitTextLocatorUpdate(locator: Locator) {
         textLocatorEventChannel?.sendEvent(locator)
-    }
 
-    /**
-     * Emit an error event to the flutter layer via the error event channel.
-     */
-    fun emitError(message: String, code: String? = null, data: String? = null) {
-        errorEventChannel?.sendEvent(ReadiumErrorEvent(message = message, code = code, data = data))
-    }
-
-    // ─── PDF Support ─────────────────────────────────────────────────────────
-
-    /**
-     * Kiểm tra xem publication hiện tại có phải là PDF hay không.
-     * PDF publications thường có readingOrder đầu tiên với mediaType chứa "pdf".
-     */
-    fun isCurrentPublicationPdf(): Boolean {
-        val pub = _currentPublication ?: return false
-        return isPdfPublication(pub)
-    }
-
-    /**
-     * Helper: Kiểm tra [Publication] có phải là PDF không.
-     */
-    fun isPdfPublication(publication: org.readium.r2.shared.publication.Publication): Boolean {
-        // Kiểm tra qua readingOrder media type
-        val firstLinkType = publication.readingOrder.firstOrNull()?.mediaType?.toString() ?: ""
-        if (firstLinkType.contains("pdf", ignoreCase = true)) return true
-
-        // Kiểm tra qua manifest links
-        val selfLink = publication.links.firstOrNull { it.rels.contains("self") }
-        val selfType = selfLink?.mediaType?.toString() ?: ""
-        if (selfType.contains("pdf", ignoreCase = true)) return true
-
-        return false
-    }
-
-    /**
-     * Lấy đường dẫn file PDF từ publication hiện tại (nếu là PDF).
-     *
-     * Trả về đường dẫn tuyệt đối đến file PDF trên thiết bị,
-     * hoặc null nếu publication không phải PDF hoặc không phải local file.
-     *
-     * Path được cache trong [currentPdfFilePath] từ lúc [openPublication] thành công
-     * để tránh re-parse URL (vấn đề với tên file có dấu cách).
-     */
-    fun getCurrentPdfFilePath(): String? {
-        val path = cachedPdfFilePath
-        Log.d(TAG, "getCurrentPdfFilePath: '$path' (currentPublicationUrl='$currentPublicationUrl')")
-        return path
+        currentTextLocator.value = locator
     }
 }

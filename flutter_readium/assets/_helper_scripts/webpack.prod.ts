@@ -1,10 +1,12 @@
-import * as TerserPlugin from 'terser-webpack-plugin';
-import * as webpack from 'webpack';
+import TerserPlugin from 'terser-webpack-plugin';
+import webpack from 'webpack';
 
 export default <webpack.Configuration>{
   mode: 'production',
+  // devtool: 'source-map',
   optimization: {
     minimizer: [new TerserPlugin()],
+    minimize: true,
 
     splitChunks: {
       cacheGroups: {

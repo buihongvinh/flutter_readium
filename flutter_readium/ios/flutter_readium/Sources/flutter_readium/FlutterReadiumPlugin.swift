@@ -5,8 +5,6 @@ import MediaPlayer
 import ReadiumNavigator
 import ReadiumShared
 
-private let TAG = "ReadiumReaderPlugin"
-
 public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.WarningLogger, TimebasedListener {
 
   static var registrar: FlutterPluginRegistrar? = nil
@@ -31,6 +29,10 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
 
   /// Timebased Navigator. Can be TTS, Audio or MediaOverlay implementations.
   internal var timebasedNavigator: FlutterTimebasedNavigator? = nil
+
+  /// For EPUB profile, maps document path to a list of all the cssSelectors in the document.
+  /// This is used to find the current toc item.
+  private var currentPublicationCssSelectorMap: [String: [String]]?
 
   lazy var fallbackChapterTitle: LocalizedString = LocalizedString.localized([
     "en": "Chapter",
@@ -68,20 +70,16 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
   }
 
   public func log(_ warning: Warning) {
-    print(TAG, "Error in Readium: \(warning)")
+    Log.readium.error("Error while using ReadiumShared deserializer: \(warning)")
   }
 
   public func handle(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
     switch call.method {
-    case "setCustomHeaders":
-      guard let args = call.arguments as? [String: Any],
-            let httpHeaders = args["httpHeaders"] as? [String: String] else {
-        return result(FlutterError.init(
-          code: "InvalidArgument",
-          message: "Invalid custom headers map",
-          details: nil))
+    case "setLogLevel":
+      if let value = call.arguments as? Int,
+         let level = LogLevel(rawValue: value) {
+        ReadiumPluginLogger.level = level
       }
-      sharedReadium.setAdditionalHeaders(httpHeaders)
       result(nil)
     case "dispose":
       closePublication()
@@ -155,6 +153,16 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
           }
         }
       }
+    case "setCustomHeaders":
+      guard let args = call.arguments as? [String: Any],
+            let httpHeaders = args["httpHeaders"] as? [String: String] else {
+        return result(FlutterError.init(
+          code: "InvalidArgument",
+          message: "Invalid custom headers map",
+          details: nil))
+      }
+      sharedReadium.setAdditionalHeaders(httpHeaders)
+      result(nil)
     case "ttsEnable":
       Task.detached(priority: .high) {
         do {
@@ -244,6 +252,10 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
       if let rangeDecorationMap = args[1] as? Dictionary<String, String> {
         ttsRangeDecorationStyle = try! Decoration.Style(fromMap: rangeDecorationMap)
       }
+      Task { @MainActor in
+        self.timebasedNavigator?.decorationsUpdated()
+      }
+      
       result(nil)
     case "ttsSetPreferences":
       let args = call.arguments as? Dictionary<String, Any>
@@ -274,9 +286,13 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
       }
 
       Task.detached(priority: .high) {
-        // If no locator provided, try to start from current ReaderView position.
-        if (locator == nil) {
-          locator = await self.currentReaderView?.getFirstVisibleLocator()
+        if locator == nil {
+          /// If no locator provided, try to re-start from latest timebased locator, or lastly the current ReaderView position.
+          if let currentTimebasedLocator = self.timebasedNavigator?.currentLocator {
+            locator = currentTimebasedLocator
+          } else {
+            locator = await self.currentReaderView?.getFirstVisibleLocator()
+          }
         }
         await self.timebasedNavigator?.play(fromLocator: locator)
 
@@ -286,9 +302,12 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
       }
     case "stop":
       Task { @MainActor in
-        self.timebasedNavigator?.dispose()
-        self.timebasedNavigator = nil
-        self.updateReaderViewTimebasedDecorations([])
+        if self.timebasedNavigator != nil {
+          self.timebasedNavigator?.dispose()
+          self.timebasedNavigator = nil
+          self.timebasedPlayerStateStreamHandler?.sendEvent(ReadiumTimebasedState(state: .none).toJsonString())
+          self.updateReaderViewTimebasedDecorations([])
+        }
       }
       result(nil)
     case "pause":
@@ -316,6 +335,31 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
         await self.timebasedNavigator?.seekBackward()
       }
       result(nil)
+    case "goToProgression":
+      Task.detached(priority: .high) {
+        guard let progression = call.arguments as? Double
+        else {
+          await MainActor.run {
+            result(FlutterError.init(
+              code: "InvalidArgument",
+              message: "Failed to parse progression",
+              details: nil))
+          }
+          return
+        }
+        var navigated = false
+        /// Only navigate on the TimebasedNavigator OR the ReaderView.
+        /// If a TimebasedNavigator is playing, it will sync the underlying reader after seeking.
+        if (self.timebasedNavigator != nil) {
+          navigated = await self.timebasedNavigator?.seek(toProgression: progression) ?? false
+        }
+        else if let readerView = self.currentReaderView {
+          navigated = await readerView.goToProgression(progression, animated: false)
+        }
+        await MainActor.run { [navigated] in
+          result(navigated)
+        }
+      }
     case "goToLocator":
       Task.detached(priority: .high) {
         guard let args = call.arguments as? [Any?],
@@ -337,9 +381,8 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
           navigated = await self.timebasedNavigator?.seek(toLocator: locator) ?? false
         }
         // ReaderView goTo
-        else if (self.currentReaderView != nil) {
-          await self.currentReaderView?.goToLocator(locator: locator, animated: false)
-          navigated = true
+        else if let readerView = self.currentReaderView {
+          navigated = await readerView.goToLocator(locator, animated: false)
         }
         await MainActor.run { [navigated] in
           result(navigated)
@@ -419,6 +462,42 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
         let _ = await self.timebasedNavigator?.seekRelative(byOffsetSeconds: seekOffset)
         result(nil)
       }
+    case "searchInPublication":
+          guard let publication = getCurrentPublication(),
+                let query = call.arguments as? String
+          else {
+            result(
+              FlutterError(
+                code: "InvalidArgument",
+                message: "No publication open or invalid parameters to searchInPublication",
+                details: nil))
+            return
+          }
+          Task {
+            do {
+              let searchResults = await publication.searchInContentForQuery(query)
+              switch searchResults {
+              case .failure(let err):
+                throw err
+              case .success(let searchResultsCols):
+                let fallbackTitle = searchResultsCols.first?.metadata.title ?? publication.metadata.title ?? "Unknown chapter"
+                // TODO: Should we try to find physical page-numbers for the results?
+                let results = searchResultsCols.flatMap { $0.locators.map { l in TextSearchResult(locator: l, chapterTitle: l.title ?? fallbackTitle, pageNumbers: nil) } }
+                let searchResultsJson = try results.compactMap { try $0.toJsonString() }
+                await MainActor.run {
+                  result(searchResultsJson)
+                }
+              }
+            } catch {
+              await MainActor.run {
+                result(
+                  FlutterError(
+                    code: "SearchError",
+                    message: "Failed to perform search with query: \(query)",
+                    details: error.localizedDescription))
+              }
+            }
+          }
 
     default:
       result(FlutterMethodNotImplemented)
@@ -426,25 +505,49 @@ public class FlutterReadiumPlugin: NSObject, FlutterPlugin, ReadiumShared.Warnin
   }
 
   public func timebasedNavigator(_: any FlutterTimebasedNavigator, didChangeState state: ReadiumTimebasedState) {
-    print(TAG, "TimebasedNavigator state: \(state)")
-    timebasedPlayerStateStreamHandler?.sendEvent(state.toJsonString())
+    Log.navigator.debug("ReadiumTimebasedState: \(state.state)")
+
+    Task.detached(priority: .high) {
+      /// Enrich the Locator with ToC if missing.
+      if var locator = state.currentLocator,
+         locator.locations.otherLocations["tocHref"] == nil {
+        var tocLink: Link?
+        /// Find ToC link via time fragment if present, or via the ContentService if not.
+        if locator.locations.time?.begin != nil {
+          tocLink = self.currentTocLinkFromTimeLocator(locator)
+        } else {
+          tocLink = try? await self.currentTocLinkFromLocator(locator)
+        }
+        if let tocLink = tocLink {
+          locator.locations.otherLocations["tocHref"] = tocLink.href
+          locator.title = tocLink.title
+          Log.navigator.debug("ReadiumTimebasedState: enriched with tocHref: \(String(describing: tocLink.href))")
+          state.currentLocator = locator
+        }
+      }
+
+      Task { @MainActor [state] in
+        self.lastTimebasedPlayerState = state
+        self.timebasedPlayerStateStreamHandler?.sendEvent(state.toJsonString())
+      }
+    }
   }
 
   public func timebasedNavigator(_: any FlutterTimebasedNavigator, encounteredError error: any Error, withDescription description: String?) {
-    print(TAG, "TimebasedNavigator error: \(error), description: \(String(describing: description))")
-    FlutterReadiumPlugin.instance?.errorStreamHandler?.sendEvent(FlutterReadiumError(message: error.localizedDescription, code: "TimeBasedNavigatorError", data: description))
+    Log.readium.error("TimebasedNavigator error: \(error), description: \(String(describing: description))")
+    FlutterReadiumPlugin.instance?.errorStreamHandler?.sendEvent(FlutterReadiumError(message: error.localizedDescription, code: "TimeBasedNavigatorError", data: description).toJsonString())
   }
 
-  public func timebasedNavigator(_: any FlutterTimebasedNavigator, reachedLocator locator: ReadiumShared.Locator) {
-    print(TAG, "TimebasedNavigator reachedLocator: \(locator)")
+  public func timebasedNavigator(_: any FlutterTimebasedNavigator, reachedLocator locator: ReadiumShared.Locator, segmentDuration: TimeInterval?) {
+    Log.navigator.debug("TimebasedNavigator reachedLocator: \(locator)")
 
     Task { @MainActor [locator] in
-      await currentReaderView?.goToLocator(locator: locator, animated: false)
+      await currentReaderView?.syncToLocator(locator, animated: false, segmentDuration: segmentDuration)
     }
   }
 
   public func timebasedNavigator(_: any FlutterTimebasedNavigator, requestsHighlightAt locator: ReadiumShared.Locator?, withWordLocator wordLocator: ReadiumShared.Locator?) {
-    print(TAG, "TimebasedNavigator requestsHighlightAt: \(String(describing: locator)), withWordLocator: \(String(describing: wordLocator))")
+    Log.readium.debug("TimebasedNavigator requestsHighlightAt: \(String(describing: locator)), withWordLocator: \(String(describing: wordLocator))")
 
     // Update Reader text decorations
     var decorations: [Decoration] = []
@@ -481,28 +584,27 @@ extension FlutterReadiumPlugin {
   private func loadPublication (
     fromUrlStr: String,
   ) async -> Result<Publication, ReadiumError> {
-    var pubUrlStr = fromUrlStr
-    if (!pubUrlStr.hasPrefix("http") && !pubUrlStr.hasPrefix("file")) {
-      // Assume URLs without a supported prefix are local file paths.
-      pubUrlStr = "file://\(pubUrlStr)"
-    }
-
-    let encodedUrlStr = "\(pubUrlStr)".addingPercentEncoding(withAllowedCharacters: .urlFragmentAllowed)
-    guard let url = URL(string: encodedUrlStr!) else {
-      return .failure(ReadiumError.notFound("Invalid pub URL: \(pubUrlStr)"))
+    var url: URL
+    if fromUrlStr.hasPrefix("http") {
+      guard let httpUrl = URL(string: fromUrlStr) else {
+        return .failure(ReadiumError.notFound("Invalid pub URL: \(fromUrlStr)"))
+      }
+      url = httpUrl
+    } else {
+      url = URL(fileURLWithPath: fromUrlStr)
     }
     guard let absUrl = url.anyURL.absoluteURL else {
-      return .failure(ReadiumError.notFound("Failed to get AbsoluteUrl: \(pubUrlStr)"))
+      return .failure(ReadiumError.notFound("Failed to get AbsoluteUrl: \(url)"))
     }
 
-    print("Attempting to open publication at: \(absUrl)")
+    Log.readium.info("Attempting to open publication at: \(absUrl)")
     do {
       let pub: (Publication, Format) = try await self.openPublication(at: absUrl, allowUserInteraction: true, sender: nil)
       let mediaType: String = pub.1.mediaType?.string ?? "unknown"
-      print("Opened publication: identifier: \(pub.0.metadata.identifier ?? "[no-ident]") format: \(mediaType)")
+      Log.readium.info("Opened publication: identifier: \(pub.0.metadata.identifier ?? "[no-ident]") format: \(mediaType)")
       return .success(pub.0)
     } catch let error {
-      print("Failed to open publication: \(error)")
+      Log.readium.error("Failed to open publication: \(error)")
       return .failure(error)
     }
   }
@@ -535,6 +637,98 @@ extension FlutterReadiumPlugin {
       currentPublication?.close()
       currentPublication = nil
       currentPublicationUrlStr = nil
+      currentPublicationCssSelectorMap = [:]
     }
+  }
+}
+
+/// Extension for finding current ToC location
+extension FlutterReadiumPlugin {
+
+  /// Find the current table of content item from a locator.
+  func currentTocLinkFromLocator(_ locator: Locator) async throws -> Link? {
+    guard let publication = currentPublication else {
+      Log.toc.warn("no currentPublication")
+      return nil
+    }
+
+    /// If we already have a ToC ID from the viewer, use that for lookup.
+    if let tocId = locator.locations.otherLocations["tocId"] {
+      let tocHref = "\(locator.href)#\(tocId)"
+      let tocLink = publication.getFlattenedToC().first(where: { $0.href == tocHref })
+      return tocLink
+    }
+
+    guard let cssSelector = locator.locations.cssSelector else {
+      Log.toc.warn("No cssSelector on locator")
+      return nil
+    }
+
+    let cleanHrefPath = locator.href.path
+    let contentIds = try await epubGetAllDocumentCssSelectors(hrefPath: cleanHrefPath)
+
+    var idx = contentIds.firstIndex(of: cssSelector)
+    if idx == nil {
+      Log.toc.debug("cssSelector:\(cssSelector) not found in current href, assuming 0")
+      idx = 0
+    }
+
+    /// Note this uses ToC directly from manifest, and thus does not support LCP PDFs.
+    let flattenedToc = publication.getFlattenedToC()
+
+    let indexedToc = Dictionary(
+      uniqueKeysWithValues:
+        flattenedToc
+        .filter { RelativeURL(epubHREF: $0.href)?.path == cleanHrefPath }
+        .compactMap { item -> (Int, Link)? in
+          let fragment = RelativeURL(epubHREF: item.href)?.fragment ?? ""
+          guard let index = contentIds.firstIndex(of: "#\(fragment)") else { return nil }
+          return (index, item)
+        }
+    )
+
+    let tocItem = (indexedToc.filter { $0.key <= idx! }
+                     .sorted { $0.key < $1.key }
+                     .last?.value
+    ?? indexedToc.sorted { $0.key < $1.key }.first?.value)
+    return tocItem
+  }
+
+  func currentTocLinkFromTimeLocator(_ timeLocator: Locator) -> Link? {
+    guard let toc = currentPublication?.getFlattenedToC(),
+          let time = timeLocator.locations.time?.begin else {
+      return nil
+    }
+    let flattenedTocForHref = toc.filter {
+      $0.hrefPath == timeLocator.href.path
+    }
+    var matchedTocItem: Link?
+    for tocLink in flattenedTocForHref {
+      guard let tocTime = tocLink.timeFragmentBegin else {
+        continue
+      }
+      // Save to matchedTocItem, unless timeFromFragment is past time
+      if tocTime > time {
+        break
+      }
+      matchedTocItem = tocLink
+    }
+    return matchedTocItem
+  }
+
+  /// Get all cssSelectors for an EPUB file.
+  func epubGetAllDocumentCssSelectors(hrefPath: String) async throws -> [String] {
+    if currentPublicationCssSelectorMap == nil {
+      currentPublicationCssSelectorMap = [:]
+    }
+
+    if let cached = currentPublicationCssSelectorMap?[hrefPath] {
+      return cached
+    }
+
+    let selectors = await currentPublication?.findAllCssSelectors(hrefRelativePath: hrefPath) ?? []
+
+    currentPublicationCssSelectorMap?[hrefPath] = selectors
+    return selectors
   }
 }

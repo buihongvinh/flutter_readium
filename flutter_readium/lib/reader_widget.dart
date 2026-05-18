@@ -2,13 +2,11 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:collection/collection.dart';
 import 'package:flutter/material.dart' as mq show Orientation;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_readium_platform_interface/flutter_readium_platform_interface.dart';
-import 'package:rxdart/rxdart.dart';
+import 'package:flutter_readium/flutter_readium.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import 'reader_channel.dart';
@@ -19,38 +17,42 @@ const _viewType = 'dk.nota.flutter_readium/ReadiumReaderWidget';
 class ReadiumReaderWidget extends StatefulWidget {
   const ReadiumReaderWidget({
     required this.publication,
-    this.loadingWidget = const Center(child: CircularProgressIndicator()),
+    this.loadingWidget,
     this.initialLocator,
-    this.onTap,
-    this.onGoLeft,
-    this.onGoRight,
-    this.onSwipe,
+    this.shouldShowControls,
     this.onExternalLinkActivated,
+    this.goBackwardSemanticLabel = 'Go Backward',
+    this.goForwardSemanticLabel = 'Go Forward',
+    this.toggleShowControlsSemanticLabel = 'Toggle show controls',
+    this.verticalScroll = false,
     super.key,
   });
 
   final Publication publication;
-  final Widget loadingWidget;
+
+  /// Optional widget to show while the reader is loading, e.g. a spinner.
+  /// It will be shown until the reader sends its first onPageChanged event.
+  /// It should typically be a full-screen widget, since it will be stacked on top of the reader widget.
+  final Widget? loadingWidget;
   final Locator? initialLocator;
-  final VoidCallback? onTap;
-  final VoidCallback? onGoLeft;
-  final VoidCallback? onGoRight;
-  final VoidCallback? onSwipe;
+  final ValueNotifier<bool>? shouldShowControls;
   final Function(String)? onExternalLinkActivated;
+  final String goBackwardSemanticLabel;
+  final String goForwardSemanticLabel;
+  final String toggleShowControlsSemanticLabel;
+  final bool verticalScroll;
 
   @override
   State<StatefulWidget> createState() => _ReadiumReaderWidgetState();
 }
 
-class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget>
-    implements ReadiumReaderWidgetInterface {
+class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget> implements ReadiumReaderWidgetInterface {
   static const _wakelockTimerDuration = Duration(minutes: 30);
 
   Timer? _wakelockTimer;
   ReadiumReaderChannel? _channel;
   bool wasDestroyed = false;
   bool isReady = false;
-  EPUBPreferences? _pendingPreferences;
 
   final _isReadyCompleter = Completer<Locator>();
 
@@ -63,10 +65,14 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget>
     return _readium.defaultPreferences;
   }
 
+  /// Last time that the controls were hidden due to a touch, used to guess whether a tap was caused
+  /// by such a touch.
+  DateTime? _lastTouchHideControls;
+
   @override
   void initState() {
     super.initState();
-    R2Log.d('ReadiumReaderWidget initiated');
+    R2Log.d('ReadiumReaderWidget init');
 
     _readerWidget = _buildNativeReader();
     _enableWakelock();
@@ -75,7 +81,7 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget>
 
   @override
   void dispose() {
-    R2Log.d('ReadiumReaderWidget disposed');
+    R2Log.d('ReadiumReaderWidget dispose');
     _cleanup();
     _channel?.dispose();
     _channel = null;
@@ -90,132 +96,105 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget>
   @override
   Widget build(final BuildContext context) {
     _onOrientationChangeWorkaround(MediaQuery.orientationOf(context));
+    var userSwipe = false;
+    final verticalScroll = widget.verticalScroll;
 
-    return Listener(
-      onPointerDown: (final _) {
-        _enableWakelock();
-      },
-      child: _readerWidget,
+    final readingProgression = widget.publication.metadata.readingProgression;
+    // TODO: this presumes that ReadingProgression value btt or vertical scroll using btt is not ever used
+    final leftUpLabel = readingProgression == ReadingProgression.rtl && !verticalScroll
+        ? widget.goForwardSemanticLabel
+        : widget.goBackwardSemanticLabel;
+    final rightDownLabel = readingProgression == ReadingProgression.rtl && !verticalScroll
+        ? widget.goBackwardSemanticLabel
+        : widget.goForwardSemanticLabel;
+
+    return Stack(
+      children: [
+        Positioned(
+          left: 0,
+          top: 0,
+          width: verticalScroll ? null : 70,
+          height: verticalScroll ? 100 : null,
+          right: verticalScroll ? 0 : null,
+          bottom: verticalScroll ? null : 0,
+          child: _buildSemanticsPrevNextPage(label: leftUpLabel, toNextPage: false),
+        ),
+        // TODO: This presumes there is only one semantic label, for when the different toggles
+        Positioned.fill(child: _buildSemanticsToggleFullScreen(label: widget.toggleShowControlsSemanticLabel)),
+        Positioned(
+          top: verticalScroll ? null : 0,
+          right: 0,
+          width: verticalScroll ? null : 70,
+          height: verticalScroll ? 100 : null,
+          left: verticalScroll ? 0 : null,
+          bottom: 0,
+          child: _buildSemanticsPrevNextPage(label: rightDownLabel, toNextPage: true),
+        ),
+        ExcludeSemantics(
+          child: Listener(
+            onPointerDown: (final _) {
+              _enableWakelock();
+            },
+            onPointerMove: (final event) {
+              if (userSwipe) {
+                return;
+              }
+
+              userSwipe = event.delta.distance > 3.0;
+
+              if (userSwipe) {
+                _onInteraction();
+              }
+            },
+            onPointerUp: (final event) async {
+              if (userSwipe) {
+                /// Wait for page animation to complete.
+                await Future.delayed(const Duration(seconds: 1));
+              } else {
+                final dx = event.position.dx;
+
+                if (dx < 70.0 || ((context.size?.width ?? 0) - dx) < 70.0) {
+                  // edge tap
+                  _onInteraction();
+                } else {
+                  // center tap
+                  _toggleControls();
+                }
+              }
+
+              userSwipe = false;
+            },
+
+            child: _readerWidget,
+          ),
+        ),
+        if (!isReady && widget.loadingWidget != null) Positioned.fill(child: widget.loadingWidget!),
+      ],
     );
   }
 
   @override
-  Future<void> go(
-    final Locator locator, {
-    required final bool isAudioBookWithText,
-    final bool animated = false,
-  }) async {
+  Future<void> go(final Locator locator, {required final bool isAudioBookWithText, final bool animated = false}) async {
     R2Log.d(() => 'Go to $locator');
 
-    await _channel?.go(
-      locator,
-      animated: animated,
-      isAudioBookWithText: isAudioBookWithText,
-    );
+    await _channel?.go(locator, animated: animated, isAudioBookWithText: isAudioBookWithText);
 
-    R2Log.d('Done');
+    R2Log.d('Go to locator completed');
   }
 
   @override
-  Future<void> goLeft({final bool animated = true}) async => _channel?.goLeft();
+  Future<void> goBackward({final bool animated = true}) async => _channel?.goBackward();
 
   @override
-  Future<void> goRight({final bool animated = true}) async =>
-      _channel?.goRight();
-
-  @override
-  Future<void> skipToNext({final bool animated = true}) async {
-    List<Link>? toc = widget.publication.toc;
-    if (toc.isEmpty || _currentLocator == null) {
-      return;
-    }
-    String? currentHref = getTextLocatorHrefWithTocFragment(_currentLocator);
-
-    // Ensure we are at least 1 page into the current chapter, if not in scroll mode.
-    // TODO: Find a better way to do this, maybe a `lastVisibleLocator` ?
-    if (_readium.defaultPreferences?.verticalScroll != true) {
-      await _channel?.goRight(animated: false);
-      final loc = await _channel?.getCurrentLocator();
-      currentHref = getTextLocatorHrefWithTocFragment(loc);
-    }
-
-    int? curIndex = toc.indexWhere((l) => l.href == currentHref);
-    if (curIndex > -1) {
-      final newIndex = (curIndex + 1).clamp(0, toc.length - 1);
-      Locator? nextChapter = widget.publication.locatorFromLink(toc[newIndex]);
-      if (nextChapter != null) {
-        await _channel?.go(
-          nextChapter,
-          isAudioBookWithText: false,
-          animated: true,
-        );
-      }
-    }
-  }
-
-  @override
-  Future<void> skipToPrevious({final bool animated = true}) async {
-    List<Link>? toc = widget.publication.toc;
-    if (toc.isEmpty || _currentLocator == null) {
-      return;
-    }
-    String? currentHref = getTextLocatorHrefWithTocFragment(_currentLocator);
-    int? curIndex = toc.indexWhere((l) => l.href == currentHref);
-    if (curIndex > -1) {
-      final newIndex = (curIndex - 1).clamp(0, toc.length - 1);
-      Locator? previousChapter = widget.publication.locatorFromLink(
-        toc[newIndex],
-      );
-      if (previousChapter != null) {
-        await _channel?.go(
-          previousChapter,
-          isAudioBookWithText: false,
-          animated: true,
-        );
-      }
-    }
-  }
-
-  @override
-  Future<Locator?> getLocatorFragments(final Locator locator) async {
-    R2Log.d('getLocatorFragments: $locator');
-
-    await _awaitNativeViewReady();
-
-    return await _channel?.getLocatorFragments(locator);
-  }
-
-  @override
-  Future<Locator?> getCurrentLocator() async {
-    R2Log.d('GetCurrentLocator()');
-    final channel = _channel;
-    if (channel == null || wasDestroyed) {
-      return _currentLocator;
-    }
-
-    try {
-      return await channel.getCurrentLocator() ?? _currentLocator;
-    } on Object catch (error) {
-      R2Log.w('getCurrentLocator failed, returning cached locator: $error');
-      return _currentLocator;
-    }
-  }
+  Future<void> goForward({final bool animated = true}) async => _channel?.goForward();
 
   @override
   Future<void> setEPUBPreferences(EPUBPreferences preferences) async {
-    _pendingPreferences = preferences;
-    final channel = _channel;
-    if (channel == null) {
-      return;
-    }
-    await channel.setEPUBPreferences(preferences);
+    _channel?.setEPUBPreferences(preferences);
   }
 
   @override
-  Future<void> applyDecorations(
-    String id,
-    List<ReaderDecoration> decorations,
-  ) async {
+  Future<void> applyDecorations(String id, List<ReaderDecoration> decorations) async {
     await _channel?.applyDecorations(id, decorations);
   }
 
@@ -229,9 +208,7 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget>
     final creationParams = <String, dynamic>{
       'pubIdentifier': publication.identifier,
       'preferences': defaultPreferences,
-      'initialLocator': widget.initialLocator == null
-          ? null
-          : json.encode(widget.initialLocator),
+      'initialLocator': widget.initialLocator == null ? null : json.encode(widget.initialLocator),
     };
 
     R2Log.d('creationParams=$creationParams');
@@ -267,11 +244,7 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget>
     }
     return ColoredBox(
       color: const Color(0xffff00ff),
-      child: Center(
-        child: Text(
-          'TODO — Implement ReadiumReaderWidget on ${Platform.operatingSystem}.',
-        ),
-      ),
+      child: Center(child: Text('TODO — Implement ReadiumReaderWidget on ${Platform.operatingSystem}.')),
     );
   }
 
@@ -308,7 +281,7 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget>
     _channel = ReadiumReaderChannel(
       '$_viewType:$id',
       onPageChanged: (final locator) {
-        debugPrint('onPageChanged: ${locator.toJson()}');
+        R2Log.d(() => 'onPageChanged: ${locator.toJson()}');
         _currentLocator = locator;
 
         if (isReady == false) {
@@ -320,42 +293,7 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget>
       },
     );
 
-    final pendingPreferences = _pendingPreferences;
-    if (pendingPreferences != null) {
-      unawaited(_channel?.setEPUBPreferences(pendingPreferences));
-    }
-
     R2Log.d('New widget is: ${_channel?.name}');
-
-    // TODO: This is just to demo how to use and debounce the Stream, remove when appropriate.
-    final nativeLocatorStream = _readium.onTextLocatorChanged
-        .debounceTime(const Duration(milliseconds: 50))
-        .asBroadcastStream()
-        .distinct();
-
-    nativeLocatorStream.listen((locator) {
-      R2Log.d('ReaderWidget.LocatorChanged - $locator');
-    });
-  }
-
-  Future _awaitNativeViewReady() {
-    return _isReadyCompleter.future;
-  }
-
-  /// Gets a Locator's href with toc fragment appended as identifier
-  String? getTextLocatorHrefWithTocFragment(Locator? locator) {
-    if (locator == null) {
-      return null;
-    }
-
-    final txtLoc = locator.toTextLocator();
-    final tocFragment = locator.locations?.fragments.firstWhereOrNull(
-      (f) => f.startsWith("toc="),
-    );
-    if (tocFragment == null) {
-      return null;
-    }
-    return '${txtLoc.toTextLocator().hrefPath.substring(1)}#${tocFragment.substring(4)}';
   }
 
   /// TODO: Remove this workaround, if the underlying issue is completely fixed in Readium.
@@ -377,20 +315,61 @@ class _ReadiumReaderWidgetState extends State<ReadiumReaderWidget>
       // trigger scrolling to the nearest page.
       if (_lastOrientation != null && _currentLocator != null) {
         Future.delayed(const Duration(milliseconds: 500)).then((final value) {
-          R2Log.d(
-            'Orientation changed. Re-navigating to current locator to re-align page.',
-          );
+          R2Log.d('Orientation changed. Re-navigating to current locator to re-align page.');
           R2Log.d('locator = $_currentLocator');
           _channel?.go(
             _currentLocator!,
             animated: false,
-            isAudioBookWithText:
-                false, // TODO: isAudioBookWithText - we don't know atm.
+            isAudioBookWithText: false, // TODO: isAudioBookWithText - we don't know atm.
           );
         });
       }
 
       _lastOrientation = orientation;
     }
+  }
+
+  void _toggleControls() {
+    if (widget.shouldShowControls == null) return;
+
+    final last = _lastTouchHideControls;
+    final delta = last != null ? DateTime.now().difference(last) : null;
+    // If we recently hid the controls due to a touch, assume that the tap is due to that same
+    // touch, so don't re-show the controls.
+    if (delta == null || delta > const Duration(milliseconds: 400)) {
+      widget.shouldShowControls!.value = !widget.shouldShowControls!.value;
+      // Debounce taps, since Readium apparently sends a double onTap on some devices.
+      _lastTouchHideControls = DateTime.now();
+    }
+  }
+
+  void _onInteraction() {
+    if (widget.shouldShowControls?.value == true) {
+      widget.shouldShowControls?.value = false;
+      _lastTouchHideControls = DateTime.now();
+    }
+  }
+
+  Widget _buildSemanticsPrevNextPage({required final String label, required final bool toNextPage}) {
+    return Semantics(
+      // TODO: this is not necessarily how it should be handled needs to be evaluated more
+      sortKey: OrdinalSortKey(toNextPage ? 2.0 : 0.0),
+      button: true,
+      container: true,
+      label: label,
+      onTap: () => toNextPage ? _channel?.goForward() : _channel?.goBackward(),
+      child: Container(color: Colors.transparent),
+    );
+  }
+
+  Widget _buildSemanticsToggleFullScreen({required final String label}) {
+    return Semantics(
+      sortKey: const OrdinalSortKey(1.0),
+      button: true,
+      container: true,
+      label: label,
+      onTap: _toggleControls,
+      child: Container(color: Colors.transparent),
+    );
   }
 }

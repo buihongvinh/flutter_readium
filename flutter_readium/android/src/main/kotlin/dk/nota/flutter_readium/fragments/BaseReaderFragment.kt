@@ -1,6 +1,5 @@
 package dk.nota.flutter_readium.fragments
 
-import android.content.Context
 import android.os.Bundle
 import android.util.Log
 import android.view.LayoutInflater
@@ -22,56 +21,28 @@ abstract class BaseReaderFragment : Fragment() {
 
     val currentLocator get() = navigator?.currentLocator
 
-    open fun go(locator: Locator?, animated: Boolean): Boolean {
+    open fun go(
+        locator: Locator?,
+        animated: Boolean,
+    ): Boolean {
         if (locator == null) {
             return false
         }
 
-        navigator?.apply {
-            Log.d(TAG, "::go - to:$locator, animated:$animated")
-            return go(locator, animated)
-        }
+        val n =
+            navigator ?: run {
+                Log.d(TAG, "::go - navigator not ready.")
+                return false
+            }
 
-        Log.d(TAG, "::go - navigator not ready.")
-        return false
-    }
-
-    override fun onDetach() {
-        Log.d(TAG, "::onDetach")
-        super.onDetach()
-    }
-
-    override fun onAttach(context: Context) {
-        Log.d(TAG, "::onAttach")
-        super.onAttach(context)
-    }
-
-    override fun onStart() {
-        Log.d(TAG, "::onStart")
-        super.onStart()
-        Log.d(TAG, "::onStart - ended")
-    }
-
-    override fun onStop() {
-        Log.d(TAG, "::onStop")
-        super.onStop()
-    }
-
-    override fun onResume() {
-        Log.d(TAG, "::onResume")
-        super.onResume()
-    }
-
-    override fun onDestroyView() {
-        Log.d(TAG, "::onDestroyView")
-
-        super.onDestroyView()
+        Log.d(TAG, "::go - to:$locator, animated:$animated")
+        return n.go(locator, animated)
     }
 
     override fun onCreateView(
         inflater: LayoutInflater,
         container: ViewGroup?,
-        savedInstanceState: Bundle?
+        savedInstanceState: Bundle?,
     ): View? {
         Log.d(TAG, "::onCreateView")
         return super.onCreateView(inflater, container, savedInstanceState)

@@ -225,23 +225,13 @@ class FlutterReadiumWebPlugin extends FlutterReadiumPlatform {
   }
 
   @override
-  Future<void> goLeft({final bool animated = true}) async {
-    JsPublicationChannel.goLeft();
+  Future<void> goBackward({final bool animated = true}) async {
+    JsPublicationChannel.goBackward();
   }
 
   @override
-  Future<void> goRight({final bool animated = true}) async {
-    JsPublicationChannel.goRight();
-  }
-
-  @override
-  Future<void> skipToNext() async {
-    R2Log.d('skipToNext is not implemented on web platform');
-  }
-
-  @override
-  Future<void> skipToPrevious() async {
-    R2Log.d('skipToPrevious is not implemented on web platform');
+  Future<void> goForward({final bool animated = true}) async {
+    JsPublicationChannel.goForward();
   }
 
   @override

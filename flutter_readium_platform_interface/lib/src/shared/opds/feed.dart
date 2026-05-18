@@ -5,14 +5,14 @@
 // ignore_for_file: must_be_immutable
 
 import 'package:equatable/equatable.dart';
-import 'package:fimber/fimber.dart';
-import 'package:json_annotation/json_annotation.dart';
 import 'package:meta/meta.dart';
 
 import '../../../flutter_readium_platform_interface.dart';
 
 @immutable
-class Feed extends AdditionalProperties with EquatableMixin implements JSONable {
+class Feed extends AdditionalProperties
+    with EquatableMixin
+    implements JSONable {
   const Feed({
     this.metadata = const OpdsMetadata(localizedTitle: LocalizedString()),
     this.links = const [],
@@ -33,7 +33,16 @@ class Feed extends AdditionalProperties with EquatableMixin implements JSONable 
   final List<String> context;
 
   @override
-  List<Object?> get props => [metadata, links, facets, groups, publications, navigation, context, additionalProperties];
+  List<Object?> get props => [
+    metadata,
+    links,
+    facets,
+    groups,
+    publications,
+    navigation,
+    context,
+    additionalProperties,
+  ];
 
   @override
   String toString() =>
@@ -86,17 +95,31 @@ class Feed extends AdditionalProperties with EquatableMixin implements JSONable 
     }
 
     final jsonObject = Map<String, dynamic>.of(json);
-    final metadata = OpdsMetadata.fromJson(jsonObject.optNullableMap('metadata', remove: true));
+    final metadata = OpdsMetadata.fromJson(
+      jsonObject.optNullableMap('metadata', remove: true),
+    );
     if (metadata == null) {
       return null;
     }
 
-    final links = Link.fromJsonArray(jsonObject.optJsonArray('links', remove: true));
-    final facets = Facet.fromJsonArray(jsonObject.optJsonArray('facets', remove: true));
-    final groups = Group.fromJsonArray(jsonObject.optJsonArray('groups', remove: true));
-    final publications = OpdsPublication.fromJsonArray(jsonObject.optJsonArray('publications', remove: true));
-    final navigation = Link.fromJsonArray(jsonObject.optJsonArray('navigation', remove: true));
-    final context = (jsonObject.optJsonArray('@context', remove: true) ?? []).map((e) => e.toString()).toList();
+    final links = Link.fromJsonArray(
+      jsonObject.optJsonArray('links', remove: true),
+    );
+    final facets = Facet.fromJsonArray(
+      jsonObject.optJsonArray('facets', remove: true),
+    );
+    final groups = Group.fromJsonArray(
+      jsonObject.optJsonArray('groups', remove: true),
+    );
+    final publications = OpdsPublication.fromJsonArray(
+      jsonObject.optJsonArray('publications', remove: true),
+    );
+    final navigation = Link.fromJsonArray(
+      jsonObject.optJsonArray('navigation', remove: true),
+    );
+    final context = (jsonObject.optJsonArray('@context', remove: true) ?? [])
+        .map((e) => e.toString())
+        .toList();
 
     return Feed(
       metadata: metadata,
@@ -109,34 +132,4 @@ class Feed extends AdditionalProperties with EquatableMixin implements JSONable 
       additionalProperties: jsonObject,
     );
   }
-}
-
-class FeedJsonConverter extends JsonConverter<Feed, Map<String, dynamic>> {
-  const FeedJsonConverter();
-
-  static final FimberLog _logger = FimberLog('FeedJsonConverter');
-
-  @override
-  Feed fromJson(Map<String, dynamic> json) {
-    final feed = Feed.fromJson(json);
-    if (feed == null) {
-      _logger.w('Feed.fromJson returned null, creating a dummy Feed');
-      return const Feed();
-    }
-
-    return feed;
-  }
-
-  @override
-  Map<String, dynamic> toJson(Feed feed) => feed.toJson();
-}
-
-class FeedNullableJsonConverter extends JsonConverter<Feed?, Map<String, dynamic>?> {
-  const FeedNullableJsonConverter();
-
-  @override
-  Feed? fromJson(Map<String, dynamic>? json) => Feed.fromJson(json);
-
-  @override
-  Map<String, dynamic>? toJson(Feed? feed) => feed?.toJson();
 }

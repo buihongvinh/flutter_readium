@@ -7,14 +7,9 @@
 import 'package:dartx/dartx.dart';
 import 'package:equatable/equatable.dart';
 import 'package:fimber/fimber.dart';
-import 'package:json_annotation/json_annotation.dart';
 import 'package:meta/meta.dart';
 
-import '../../utils/href.dart';
-import '../../utils/jsonable.dart';
-import '../../utils/uri_template.dart';
-import '../mediatype/mediatype.dart';
-import 'properties.dart';
+import '../../../flutter_readium_platform_interface.dart';
 
 export 'link_list_extension.dart';
 
@@ -123,11 +118,11 @@ class Link with EquatableMixin implements JSONable {
   /// given collection role.
   final List<Link> children;
 
-  List<String> get _hrefParts => href.split('#');
+  (String, String?) get _hrefParts => href.splitPathAndFragment();
 
-  String get hrefPart => _hrefParts[0];
+  String get hrefPart => _hrefParts.$1;
 
-  String? get elementId => (_hrefParts.length > 1) ? _hrefParts[1] : null;
+  String? get elementId => _hrefParts.$2;
 
   Link copyWith({
     String? id,
@@ -240,56 +235,4 @@ class Link with EquatableMixin implements JSONable {
 
   @override
   String toString() => 'Link{id: $id, href: $href, type: $type, title: $title, rels: $rels, properties: $properties}';
-}
-
-/// JSON converter for [Link].
-/// Note: If fromJson fails to parse the link, a warning will be logged and a default [Link] with an empty href will be returned.
-class LinkJsonConverter extends JsonConverter<Link, Map<String, dynamic>> {
-  const LinkJsonConverter();
-
-  static final FimberLog _logger = FimberLog('LinkJsonConverter');
-
-  @override
-  Link fromJson(Map<String, dynamic> json) {
-    final link = Link.fromJson(json);
-    if (link == null) {
-      _logger.w('Failed to parse Link from JSON: $json');
-      return Link(href: '');
-    }
-
-    return link;
-  }
-
-  @override
-  Map<String, dynamic> toJson(Link link) => link.toJson();
-}
-
-class LinkNullableJsonConverter extends JsonConverter<Link?, Map<String, dynamic>?> {
-  const LinkNullableJsonConverter();
-
-  @override
-  Link? fromJson(Map<String, dynamic>? json) => Link.fromJson(json);
-
-  @override
-  Map<String, dynamic>? toJson(Link? link) => link?.toJson();
-}
-
-class LinkListJsonConverter extends JsonConverter<List<Link>, List<dynamic>?> {
-  const LinkListJsonConverter();
-
-  @override
-  List<Link> fromJson(List<dynamic>? json) => Link.fromJsonArray(json);
-
-  @override
-  List<dynamic>? toJson(List<Link> links) => links.map((it) => it.toJson()).toList();
-}
-
-class LinkListNullableJsonConverter extends JsonConverter<List<Link>?, List<dynamic>?> {
-  const LinkListNullableJsonConverter();
-
-  @override
-  List<Link>? fromJson(List<dynamic>? json) => Link.fromJsonArray(json);
-
-  @override
-  List<dynamic>? toJson(List<Link>? links) => links?.map((it) => it.toJson()).toList();
 }

@@ -14,10 +14,10 @@ buildscript {
 }
 
 plugins {
-  id 'org.jetbrains.kotlin.plugin.serialization' version '2.3.10'
+  id 'org.jetbrains.kotlin.plugin.serialization' version '2.3.21'
 }
 
-group 'dk.nota.lyt.flutter_readium'
+group 'dk.nota.flutter_readium'
 version '1.0-SNAPSHOT'
 
 rootProject.allprojects {
@@ -49,7 +49,7 @@ android {
     }
   }
 
-  compileSdkVersion 35
+  compileSdkVersion 36
 
   sourceSets {
     main.java.srcDirs += 'src/main/kotlin'
@@ -57,10 +57,30 @@ android {
   }
   defaultConfig {
     minSdkVersion 24
+
+    // Max number of media-overlay JSON files fetched in parallel by the Sync
+    // Audiobook navigator. Consumers can override by adding to their
+    // `android/gradle.properties`:
+    //
+    //   flutterReadium.mediaOverlayFetchConcurrency=16
+    def defaultMediaOverlayFetchConcurrency = 8
+    def configuredMediaOverlayFetchConcurrency =
+      project.findProperty("flutterReadium.mediaOverlayFetchConcurrency")?.toString()?.trim()
+    def parsedMediaOverlayFetchConcurrency = configuredMediaOverlayFetchConcurrency?.isInteger()
+      ? configuredMediaOverlayFetchConcurrency.toInteger()
+      : defaultMediaOverlayFetchConcurrency
+    def mediaOverlayFetchConcurrency = Math.max(1, parsedMediaOverlayFetchConcurrency)
+
+    buildConfigField(
+      "int",
+      "MEDIA_OVERLAY_FETCH_CONCURRENCY",
+      mediaOverlayFetchConcurrency.toString()
+    )
   }
 
   buildFeatures {
     viewBinding = true
+    buildConfig = true
   }
 }
 
@@ -81,7 +101,7 @@ dependencies {
   //implementation "org.readium.kotlin-toolkit:readium-lcp:$readium_version"
 
   // Used for media-session controls
-  def media_version = "1.8.0"
+  def media_version = "1.10.0"
   implementation "androidx.media3:media3-common:$media_version"
   implementation "androidx.media3:media3-session:$media_version"
   implementation "androidx.media3:media3-exoplayer:$media_version"

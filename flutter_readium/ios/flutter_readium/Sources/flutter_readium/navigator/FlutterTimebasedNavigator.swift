@@ -4,7 +4,7 @@ import ReadiumShared
 public protocol TimebasedListener {
   func timebasedNavigator(_: FlutterTimebasedNavigator, didChangeState state: ReadiumTimebasedState)
   func timebasedNavigator(_: FlutterTimebasedNavigator, encounteredError error: Error, withDescription description: String?)
-  func timebasedNavigator(_: FlutterTimebasedNavigator, reachedLocator locator: Locator)
+  func timebasedNavigator(_: FlutterTimebasedNavigator, reachedLocator locator: Locator, segmentDuration: TimeInterval?)
   func timebasedNavigator(_: FlutterTimebasedNavigator, requestsHighlightAt locator: Locator?, withWordLocator wordLocator: Locator?)
 }
 
@@ -12,13 +12,10 @@ public protocol FlutterTimebasedNavigator
 {
   var publication: Publication { get }
   var initialLocator: Locator? { get }
+  var currentLocator: Locator? { get }
   var listener: TimebasedListener? { get set }
   
-  // Current Locator which should be sent back over the bridge to Flutter.
-  //var currentLocator: PassthroughSubject<Locator, Never> { get }
-  
   func initNavigator() async -> Void
-  func setupNavigatorListeners() -> Void
   @MainActor
   func dispose() -> Void
   @MainActor
@@ -36,7 +33,12 @@ public protocol FlutterTimebasedNavigator
   @MainActor
   func seek(toLocator: Locator) async -> Bool
   @MainActor
+  func seek(toProgression: Double) async -> Bool
+  @MainActor
   func seek(toOffset: Double) async -> Bool
   @MainActor
   func seekRelative(byOffsetSeconds: Double) async -> Bool
+  /// Notify TimebasedNavigator that its decorations should be updated.
+  @MainActor
+  func decorationsUpdated() -> Void
 }

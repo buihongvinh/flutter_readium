@@ -4,7 +4,9 @@ import 'package:flutter_readium/flutter_readium.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plugin_platform_interface/plugin_platform_interface.dart';
 
-class MockFlutterReadiumPlatform with MockPlatformInterfaceMixin implements FlutterReadiumPlatform {
+class MockFlutterReadiumPlatform
+    with MockPlatformInterfaceMixin
+    implements FlutterReadiumPlatform {
   @override
   ReadiumReaderWidgetInterface? currentReaderWidget;
 
@@ -18,6 +20,11 @@ class MockFlutterReadiumPlatform with MockPlatformInterfaceMixin implements Flut
   }
 
   @override
+  Future<void> setLogLevel(LogLevel level) {
+    throw UnimplementedError();
+  }
+
+  @override
   void setDefaultPreferences(EPUBPreferences preferences) {
     defaultPreferences = preferences;
   }
@@ -26,7 +33,9 @@ class MockFlutterReadiumPlatform with MockPlatformInterfaceMixin implements Flut
   Future<Publication> loadPublication(String pubUrl) => Future.value(
     Publication(
       links: [],
-      metadata: Metadata(localizedTitle: LocalizedString.fromStrings({'en': 'test'})),
+      metadata: Metadata(
+        localizedTitle: LocalizedString.fromStrings({'en': 'test'}),
+      ),
       readingOrder: [],
     ),
   );
@@ -35,7 +44,9 @@ class MockFlutterReadiumPlatform with MockPlatformInterfaceMixin implements Flut
   Future<Publication> openPublication(String pubUrl) => Future.value(
     Publication(
       links: [],
-      metadata: Metadata(localizedTitle: LocalizedString.fromStrings({'en': 'test'})),
+      metadata: Metadata(
+        localizedTitle: LocalizedString.fromStrings({'en': 'test'}),
+      ),
       readingOrder: [],
     ),
   );
@@ -57,36 +68,25 @@ class MockFlutterReadiumPlatform with MockPlatformInterfaceMixin implements Flut
   }
 
   @override
-  Future<void> goLeft() {
-    // TODO: implement goLeft
+  Future<void> goBackward() {
+    // TODO: implement goBackward
     throw UnimplementedError();
   }
 
   @override
-  Future<void> goRight() {
-    // TODO: implement goRight
+  Future<void> goForward() {
+    // TODO: implement goForward
     throw UnimplementedError();
   }
 
   @override
   // TODO: implement onReaderStatusChanged
-  Stream<ReadiumReaderStatus> get onReaderStatusChanged => throw UnimplementedError();
+  Stream<ReadiumReaderStatus> get onReaderStatusChanged =>
+      throw UnimplementedError();
 
   @override
   Future<void> setEPUBPreferences(EPUBPreferences preferences) {
     // TODO: implement setEPUBPreferences
-    throw UnimplementedError();
-  }
-
-  @override
-  Future<void> skipToNext() {
-    // TODO: implement skipToNext
-    throw UnimplementedError();
-  }
-
-  @override
-  Future<void> skipToPrevious() {
-    // TODO: implement skipToPrevious
     throw UnimplementedError();
   }
 
@@ -103,7 +103,10 @@ class MockFlutterReadiumPlatform with MockPlatformInterfaceMixin implements Flut
   }
 
   @override
-  Future<void> setDecorationStyle(ReaderDecorationStyle? utteranceDecoration, ReaderDecorationStyle? rangeDecoration) {
+  Future<void> setDecorationStyle(
+    ReaderDecorationStyle? utteranceDecoration,
+    ReaderDecorationStyle? rangeDecoration,
+  ) {
     // TODO: implement setDecorationStyle
     throw UnimplementedError();
   }
@@ -152,7 +155,8 @@ class MockFlutterReadiumPlatform with MockPlatformInterfaceMixin implements Flut
 
   @override
   // TODO: implement onTimebasedPlayerStateChanged
-  Stream<ReadiumTimebasedState> get onTimebasedPlayerStateChanged => throw UnimplementedError();
+  Stream<ReadiumTimebasedState> get onTimebasedPlayerStateChanged =>
+      throw UnimplementedError();
 
   @override
   // TODO: implement onErrorEvent
@@ -183,8 +187,20 @@ class MockFlutterReadiumPlatform with MockPlatformInterfaceMixin implements Flut
   }
 
   @override
+  Future<bool> goToProgression(double progression) {
+    // TODO: implement goToProgression
+    throw UnimplementedError();
+  }
+
+  @override
   Future<void> audioSeekBy(Duration offset) {
     // TODO: implement audioSeekBy
+    throw UnimplementedError();
+  }
+
+  @override
+  Future<List<TextSearchResult>> searchInPublication(String searchKey) {
+    // TODO: implement searchInPublication
     throw UnimplementedError();
   }
 }

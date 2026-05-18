@@ -1,10 +1,17 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 import '../state/index.dart';
 
-class TimebasedStateWidget extends StatelessWidget {
+class TimebasedStateWidget extends StatefulWidget {
   const TimebasedStateWidget({super.key});
+
+  @override
+  State<TimebasedStateWidget> createState() => _TimebasedStateWidgetState();
+}
+
+class _TimebasedStateWidgetState extends State<TimebasedStateWidget> {
+  double? isDraggingSliderValue;
 
   @override
   Widget build(BuildContext context) {
@@ -26,9 +33,21 @@ class TimebasedStateWidget extends StatelessWidget {
               // Text('TotalProgression: ${snapshot.data?.currentLocator?.locations?.totalProgression}'),
               SizedBox(height: 22),
               Text('Chapter progress:'),
-              Slider.adaptive(value: snapshot.data?.currentLocator?.locations?.progression ?? 0, onChanged: null),
+              LinearProgressIndicator(
+                value:
+                    snapshot.data?.currentLocator?.locations?.progression ??
+                    0.0,
+              ),
               Text('Total book progress:'),
-              LinearProgressIndicator(value: snapshot.data?.currentLocator?.locations?.totalProgression ?? 0),
+              LinearProgressIndicator(
+                value:
+                    snapshot
+                        .data
+                        ?.currentLocator
+                        ?.locations
+                        ?.totalProgression ??
+                    0,
+              ),
             ],
           );
         } else {
@@ -37,4 +56,6 @@ class TimebasedStateWidget extends StatelessWidget {
       },
     );
   }
+
+  void onPositionSliderChangedByUser(double value) {}
 }

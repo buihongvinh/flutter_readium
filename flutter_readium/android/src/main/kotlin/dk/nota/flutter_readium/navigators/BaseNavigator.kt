@@ -18,11 +18,10 @@ abstract class BaseNavigator(
      * The publication to navigate.
      */
     protected var publication: Publication,
-
     /**
      * The initial locator to open the publication at.
      */
-    protected var initialLocator: Locator?
+    protected var initialLocator: Locator?,
 ) {
     /**
      * List of active jobs, to be cancelled on dispose
@@ -37,7 +36,13 @@ abstract class BaseNavigator(
     /**
      * The main coroutine scope for the navigator. Most operations should be done on the main thread.
      */
-    protected val mainScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    protected val mainScope: CoroutineScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    /**
+     * The IO coroutine scope.
+     */
+    protected val ioScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     /**
      * Init the navigator
@@ -51,6 +56,7 @@ abstract class BaseNavigator(
         jobs.forEach { it.cancel() }
         jobs.clear()
         mainScope.coroutineContext.cancelChildren()
+        ioScope.coroutineContext.cancelChildren()
     }
 
     /**
@@ -68,4 +74,3 @@ abstract class BaseNavigator(
      */
     abstract fun storeState(): Bundle
 }
-
